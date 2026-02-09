@@ -10,4 +10,4 @@ jhnihoiuhoiu;;;
 
 WHAT IS GOING ON?!?
 
-What's up dog
+What's going on with you
