@@ -1,36 +1,703 @@
 import pandas as pd
-import obspy
-import matplotlib.pyplot as plt
 import numpy as np
-from obspy import read
-from obspy import read_events
-from obspy import Stream
-from obspy import Trace
-from obspy import UTCDateTime
-from datetime import datetime, time, timezone
+import matplotlib.dates as mdates
 import datetime as dt
 from scipy.optimize import least_squares
+
+import lts_array
+
+#Obspy dependencies-----------------------------
+from obspy.clients.fdsn import Client
+from obspy import read
+from obspy import read_events
+from obspy import read_inventory
+from obspy import Stream
+from obspy import UTCDateTime
 from obspy.taup import TauPyModel
-from obspy.taup import taup_create
+from obspy.core.util import AttribDict
+from obspy.signal.array_analysis import array_processing
 from obspy.geodetics import gps2dist_azimuth
 from obspy.geodetics import kilometers2degrees
 from obspy.signal.util import util_geo_km
-from obspy.signal.trigger import recursive_sta_lta, trigger_onset, classic_sta_lta
+from obspy.signal.trigger import trigger_onset, classic_sta_lta
+from obspy.clients.fdsn.header import FDSNNoDataException
+
 
 
 ############################################################
-#### FUNCTIONS FOR PULLING EARTHQUAKES ###########################
+#### FUNCTIONS FOR ARRAY CALCULATION ###########################
 ############################################################
+
+
+def least_trimmed_squares(processing, st, sta_lats, sta_lons, WINDOW_LENGTH,
+                  WINDOW_OVERLAP, eq_baz_real, eq_slow_real, analysis_type, 
+                  ):
+    
+    '''
+    Calculates least trimmed squares and organizes data
+    
+    Parameters:
+        processing: 'lts', 'ls'
+        st: obspy stream containing traces
+        sta_lats: station lats (list or array)
+        sta_lons: station lons (list or array)
+        WINDOW_LENGTH: window length of array analysis window (seconds)
+        WINDOW_OVERLAP: overlap between analysis windows
+        trigger_time: trigger time in UTC (string)
+        trigger_type: 
+            'STA/LTA': single STA/LTA trigger
+            'Multiple triggers': multiple triggers, chosen based on multiple
+                triggers input
+            'Taup': no STA/LTA trigger, using Taup time and larger window to
+                search 
+        peak: STA/LTA ratio of nearest peak to trigger
+        length: length of STA/LTA trigger duration
+        origin_lat: latitude of array center
+        origin_lon: longitude of array center
+        event_id: USGS earthquake identifier
+        eq_baz_real: backazimuth between catalog event and array
+        eq_slow_real: calculated slowness based on velocity model
+
+    Returns: 
+        pandas dataframe: 
+        'array_baz': array backazimuth
+        'array_slow': array slowness
+        'array_vel': array trace velocity
+        'mdccm': array mdccm (cross correlation power)
+        'conf_int_vel': confidence interval of trace velocity
+        'conf_int_baz': confidene interval of backazimuth
+        'time': time of array analysis (UTC)
+        'event_id': USGS event ID
+        'baz_error': backazimuth error (real - array)
+        'slow_error': slowness error (real - array)
+        'trigger_time': trigger time
+        'trigger_type': trigger type
+        'sta/lta': peak of nearest peak from sta/lta for trigger
+        'trigger_length': length of trigger in seconds
+        'num_stations': number of stations used
+        'array_lat': array center latitude
+        'array_lon': array center longitude
+    '''
+    
+    if len(st) < 4: #Can't perform lts for less than 4 stations
+        processing = 'ls'
+
+    if processing == 'lts':
+        ALPHA = 0.5 #least trimmed squares
+        print('Starting LTS')
+    else:
+        ALPHA = 1 #least squares
+        print('Starting LS')
+            
+    (lts_vel, lts_baz, t, mdccm, stdict, sigma_tau,
+        conf_int_vel, conf_int_baz) = lts_array.ltsva(st, sta_lats, 
+                                                    sta_lons, 
+                                                    WINDOW_LENGTH, 
+                                                    WINDOW_OVERLAP, 
+                                                    ALPHA)
+    #print('Length of data:', len(lts_vel))
+    if analysis_type == 'time_series':
+        tlist = []
+        for g in range(len(t)):
+            temp = str(UTCDateTime(mdates.num2date(t[g])))
+            tlist.append(temp)
+
+        time_series = np.array(tlist)
+        #print('Made it passed time_series')
+        baz_error_series = baz_error(eq_baz_real, lts_baz)
+        slow_error_series = eq_slow_real - (1/lts_vel)
+    elif analysis_type == 'single_point':
+        #Save data--------------------------------------
+        time_series = 0
+        baz_error_series = 0
+        slow_error_series = 0
+
+    if len(lts_baz) >1: #pulling out max cross correlation
+        print('Pulling out max mdccm')
+        idx = np.argmax(mdccm)
+    else: #should only be one value for trigger time
+        idx = 0
+    data = {
+        'array_baz': lts_baz[idx],
+        'array_slow': 1/lts_vel[idx],
+        'array_vel': lts_vel[idx],
+        'mdccm': mdccm[idx],
+        'conf_int_vel': conf_int_vel[idx],
+        'conf_int_baz': conf_int_baz[idx],
+        'time': str(UTCDateTime(mdates.num2date(t[idx]))),
+        'baz_error': baz_error(eq_baz_real, lts_baz[idx]),
+        'slow_error': eq_slow_real - (1/lts_vel[idx])
+        }
+    array_data = pd.DataFrame(data, index=[0]) #print(array_data)
+    return array_data, time_series, baz_error_series, slow_error_series
+
+def fk_obspy(st1, analysis_type, stations, sta_lats, sta_lons, sta_elev, START_new, END_new,
+             WINDOW_LENGTH, WINDOW_OVERLAP, FREQ_MIN, FREQ_MAX,
+             sll_x, slm_x, sll_y, slm_y, sl_s, semb_thres, vel_thres, timestamp,
+             prewhiten, eq_baz, eq_slow):
+    print('Starting FK')
+    #Add necessary data to streams----------------
+    for l in range(len(stations)):  # Uses all stations in pd dataframe stations
+        st1[l].stats.coordinates = AttribDict({
+            'latitude': sta_lats[l],
+            'elevation': sta_elev[l],
+            'longitude': sta_lons[l]})
+
+    #Set up dictionary based on input parameters----------------------------
+    kwargs = dict(
+            # slowness grid: X min, X max, Y min, Y max, Slow Step
+            sll_x=sll_x, slm_x=slm_x, sll_y=sll_y, slm_y=slm_y, sl_s=sl_s,
+            # sliding window properties
+            win_len=WINDOW_LENGTH, win_frac = WINDOW_OVERLAP, #0.25#win_frac=1-WINDOW_OVERLAP,
+            # frequency properties
+            frqlow=FREQ_MIN, frqhigh=FREQ_MAX, prewhiten=prewhiten,
+            # restrict output
+            semb_thres=semb_thres, vel_thres=vel_thres, timestamp=timestamp,
+            # start and end of analysis
+            stime=START_new, etime = END_new
+                )
+    out = array_processing(st1, **kwargs)
+    
+    #OUTPUT FROM FK PROCESSING-------------------------------------------------
+    array_out = pd.DataFrame(out, columns = ['time','relpow','abspow',
+                                             'baz_obspy','array_slow'])
+        
+
+    #Convert times and baz to same scale as lts (UTC time, centered on window)-
+    t = array_out['time'].to_numpy()
+    baz_obspy = array_out['baz_obspy'].to_numpy()
+        
+    bazs = []
+    time_error = []
+    for j in range(len(t)):
+        matplotlib_time = t[j]
+        x = mdates.num2date(matplotlib_time) 
+        x = UTCDateTime(x)
+        #diff = (x-UTCDateTime(time_station))+(win_len/2)
+        diff = str(x+(WINDOW_LENGTH/2)) #time centered on point
+        time_error.append(diff)
+        baz = baz_obspy[j]
+        if baz <= 0:
+            baz_correct = baz+360 #converts to all positive backazimuth
+        else:
+            baz_correct = baz
+        bazs.append(baz_correct)
+        
+    time_error = np.array(time_error)
+    fk_bazs = np.array(bazs)
+
+    #Calculate baz/slow error---------------------------------------
+    fk_baz_error = baz_error(eq_baz, fk_bazs)
+
+    trace_vel_error = (1/eq_slow)- 1/array_out['array_slow'].to_numpy() 
+
+    slowness_error = (eq_slow) - array_out['array_slow'].to_numpy()
+
+    #Start to aggregate data----------------------------
+    array_out['baz_error'] = fk_baz_error
+    #array_out['centered_time'] = time_error
+    array_out['time'] = time_error
+    array_out['array_baz'] = fk_bazs
+    array_out['slow_error'] = slowness_error
+    array_out['array_vel'] = 1/array_out['array_slow'].to_numpy()
+
+    #Pull out greatest power (should be only one value if using triggers)-----
+    idx = np.argmax(array_out['relpow'].to_numpy())
+    
+    if analysis_type == 'time_series':
+        time_series = array_out['time'].to_numpy()
+        baz_error_series = array_out['baz_error'].to_numpy()
+        slow_error_series = array_out['slow_error'].to_numpy()
+
+
+
+    elif analysis_type == 'single_point':
+        #Save data--------------------------------------
+        time_series = 0
+        baz_error_series = 0
+        slow_error_series = 0
+
+    
+    
+    
+    array_data = array_out.loc[[idx]]
+    array_data['conf_int_vel'] = 0 #values not returned for FK, 
+    array_data['conf_int_baz'] = 0 #values not returned for FK
+    array_data['mdccm'] = 0 #values not returned for FK
+
+    return array_data, time_series, baz_error_series, slow_error_series
+
+
+############################################################
+#### HOMER/KODIAK SPECIFIC ###########################
+############################################################
+
+def stations_available_generator_hm_kd(
+    earthquake_time,
+    station_d1_list, start_d1_list, end_d1_list,
+    station_d2_list, start_d2_list, end_d2_list,
+    array_name
+):
+
+    # ---------------------------------
+    # Convert times once
+    # ---------------------------------
+    earthquake_time = np.array([utc2datetime(str(t)) for t in earthquake_time])
+
+    start_d1 = np.array([utc2datetime(str(t)) for t in start_d1_list])
+    end_d1   = np.array([utc2datetime(str(t)) for t in end_d1_list])
+
+    start_d2 = np.array([utc2datetime(str(t)) for t in start_d2_list])
+    end_d2   = np.array([utc2datetime(str(t)) for t in end_d2_list])
+
+    station_d1 = np.array(station_d1_list)
+    station_d2 = np.array(station_d2_list)
+
+    # ---------------------------------
+    # Load bear removal data
+    # ---------------------------------
+    if array_name == "HM":
+
+        bears = pd.read_csv(
+            "/Users/cadequigley/Downloads/Research/deployment_array_design/homer_mseed_completeness.csv"
+        )[["station_name","bear_removal_time_d1","bear_removal_time_d2"]]
+
+        bear_d1 = dict(zip(bears.station_name, bears.bear_removal_time_d1))
+        bear_d2 = dict(zip(bears.station_name, bears.bear_removal_time_d2))
+
+        # build arrays aligned with station lists
+        bear_d1_arr = np.array([bear_d1.get(sta, '0') for sta in station_d1])
+        bear_d2_arr = np.array([bear_d2.get(sta, '0') for sta in station_d2])
+
+        # apply bear removal overrides
+        mask = bear_d1_arr != '0'
+        end_d1[mask] = np.array([utc2datetime(str(t)) for t in bear_d1_arr[mask]])
+
+        mask = bear_d2_arr != '0'
+        end_d2[mask] = np.array([utc2datetime(str(t)) for t in bear_d2_arr[mask]])
+
+    # ---------------------------------
+    # Output containers
+    # ---------------------------------
+    stations_lists = []
+    stations_available = []
+    deployment_all = []
+
+    # ---------------------------------
+    # Loop earthquakes only
+    # ---------------------------------
+    for eq in earthquake_time:
+
+        mask_d1 = (eq >= start_d1) & (eq <= end_d1)
+        mask_d2 = (eq >= start_d2) & (eq <= end_d2)
+
+        sta_d1 = station_d1[mask_d1]
+        sta_d2 = station_d2[mask_d2]
+
+        stations = np.concatenate([sta_d1, sta_d2])
+        deployments = ["d1"]*len(sta_d1) + ["d2"]*len(sta_d2)
+
+        stations_lists.append(stations.tolist())
+        stations_available.append(len(stations))
+        deployment_all.append(deployments)
+
+    return stations_lists, stations_available, deployment_all
+
+'''
+def process_hm_kd_data(net, sta, loc, chan,  starttime, endtime, array_name, array, processing, 
+                 FREQ_MIN, FREQ_MAX, WINDOW_LENGTH, WINDOW_OVERLAP, window_start, min_mag, max_rad,
+                 short_window, long_window, on_threshold, off_theshold, client = Client('EARTHSCOPE'), remove_stations = [], keep_stations = [], 
+                 gain = None, min_stations = 3, use_full_deployment = False, save = False, velocity_model = 'iasp91', 
+                 timing = 'trigger', min_triggers = 1, ptolerance = 5, multiple_triggers = 'peak', no_triggers = 'taup', sll_x = -1.0,
+                 slm_x = 1.0, sll_y=-1.0, slm_y = 1.0, sl_s = 0.03, semb_thres = -1e9, vel_thres = -1e9, timestamp = 'mlabday', prewhiten = 0):
+    
+    #Pull inventory-----------------------
+    #------------------------------------------------
+    deployment = 'd1'
+    path = '/Users/cadequigley/Downloads/Research/deployment_array_design/'
+    inv1 = read_inventory(path + array+'_'+deployment+'_station.xml')
+    
+    
+    (lat_list, lon_list, elev_list, station_d1_list,
+     start_d1_list, end_d1_list, num_channels_d1_list) = data_from_inventory(inv1, remove_stations, keep_stations)
+    
+    data = {
+            'station': station_d1_list,
+            'lat': lat_list,
+            'lon': lon_list,
+            'elevation': elev_list}
+    
+    station_info = pd.DataFrame(data)
+    
+    ## PULL IN DATA FOR SECOND DEPLOYMENT##########################
+    deployment = 'd2'
+    
+    ## READ IN INVENTORY FOR D2-------------------------
+    path = '/Users/cadequigley/Downloads/Research/deployment_array_design/'
+    inv2 = read_inventory(path + array+'_'+deployment+'_station.xml')
+    
+    (lat_list_d2, lon_list_d2, elev_list_d2, station_d2_list,
+     start_d2_list, end_d2_list, num_channels_d2_list) = data_from_inventory(inv2, remove_stations, keep_stations)
+    
+    #Pull earthquakes-----------------------
+    #------------------------------------------------
+    
+    #### Get center of array--------
+    
+    output = get_geometry(lat_list, lon_list, elev_list, return_center = True)
+    origin_lat = str(output[-1][1])
+    origin_lon = str(output[-1][0])
+    
+    moveout = moveout_time(output)
+    
+    
+    ### Pull in earthquakes--------------
+    start, end = array_time_window(use_full_deployment, start_d1_list, end_d2_list,
+                                   starttime, endtime)
+    
+    df = pull_earthquakes(origin_lat, origin_lon, max_rad, start, end, min_mag, array_name, velocity_model)
+    print('Number of earthquakes >'+min_mag+' within '+max_rad+' km:', len(df))
+    
+    
+    #Create station availability lists-----------------------
+    #------------------------------------------------
+    earthquake_time = df['time_utc'].to_numpy()
+    earthquake_names = df['event_id'].to_numpy()
+    
+    stations_lists, stations_available, deployment_list = stations_available_generator_hm_kd(earthquake_time, station_d1_list, start_d1_list,
+                                             end_d1_list, station_d2_list, start_d2_list, end_d2_list, array_name)
+    
+    #stations_lists, stations_available = stations_available_generator(earthquake_time, station_d1_list, start_d1_list, end_d1_list)
+    
+    ### Drop events that don't have enough stations present--------------
+    bad_idx = [i for i, v in enumerate(stations_available) if v < min_stations]
+    keep_idx = [i for i, v in enumerate(stations_available) if v >= min_stations]
+    
+    stations_available = [stations_available[i] for i in keep_idx]
+    stations_lists = [stations_lists[i] for i in keep_idx]
+    deployment_list = [deployment_list[i] for i in keep_idx]
+    df = df.drop(index=bad_idx)
+    
+    print('Station lists for each earthquake created. New earthquake number:', len(df))
+    
+    ###Loop over all events---------------------------------
+    
+    event_ids = df['event_id'].to_numpy()
+    eq_depths = df['depth'].to_numpy()
+    eq_lats = df['latitude'].to_numpy()
+    eq_lons = df['longitude'].to_numpy()
+    eq_time = df['time_utc'].to_numpy()
+    expected_parrival = df['p_arrival'].to_numpy()
+    eq_baz = df['backazimuth'].to_numpy()
+    eq_slow = df['slowness'].to_numpy()
+    eq_distance = df['distance'].to_numpy()
+    array_data_list = []
+    misbehaving_list = []
+    for event in range(len(df)):
+        try:
+            print("Starting", event_ids[event])
+            stations = stations_lists[event] #pull out stations available for each event
+            station_sub = station_info[station_info['station'].isin(stations)] #pull out specific station info
+        
+            sta_lats = station_sub['lat'].to_numpy()
+            sta_lons = station_sub['lon'].to_numpy()
+            stations = station_sub['station'].to_numpy()
+            sta_elev = station_sub['elevation'].to_numpy()
+            eq_baz_real = eq_baz[event]
+            eq_slow_real = eq_slow[event]
+            event_id = event_ids[event]
+    
+    
+            START = UTCDateTime(eq_time[event])+expected_parrival[event]-60
+            END = START +120
+            try: #Try to pull event from locally
+                if array_name =='HM':
+                    array = 'homer'
+                else:
+                    array = 'kodiak'
+                st = read('/Users/cadequigley/Downloads/Research/deployment_array_design/'+array+'_earthquakes_mseeds/'+event_ids[event]+".mseed")
+                st = st.slice(START, END)
+                #st = read('/Users/cadequigley/Downloads/Research/'+array+'_earthquakes_mseeds/'+event_ids[event]+".mseed")
+            except FileNotFoundError:
+                print('File not found locally, trying to pull from IRIS')
+                st = Stream()
+                failed_stations = []
+        
+                for sta in stations:
+                    try:
+                        st += client.get_waveforms(net, sta, loc, chan, START, END)
+                    except FDSNNoDataException:
+                        print(f"No data for station {sta}")
+                        failed_stations.append(sta)
+                    except Exception as e:
+                        print(f"Error for station {sta}: {e}")
+                        failed_stations.append(sta)
+        
+                # Remove failed stations
+                if failed_stations:
+                    mask = ~np.isin(stations, failed_stations)
+                    stations = stations[mask]
+                    sta_lats = sta_lats[mask]
+                    sta_lons = sta_lons[mask]
+                    sta_elev = sta_elev[mask]
+                    
+            if len(keep_stations) >0:
+                st_subset = Stream()
+                for sta in stations:
+                    st_subset += st.select(station=sta)
+                st = st_subset.copy()
+    
+            if len(st) < min_stations:
+                raise ValueError("Not enough traces")
+    
+            #st.resample(100) #testing to see if data is resampled now
+            st.merge(fill_value='latest')
+            #st.trim(START, END, pad='true', fill_value=0)
+            st.sort()
+            #if deployment_list[event][0] == 'd1':
+                #st.remove_sensitivity(inventory = inv1)
+            #else:
+                #st.remove_sensitivity(inventory = inv2)
+            for b in range(len(st)):
+                tr = st[b]
+                tr.data = tr.data/gain
+                
+                
+    
+            # Filter the data
+            st.filter("bandpass", freqmin=FREQ_MIN, freqmax=FREQ_MAX, corners=2, zerophase=True)
+            st.taper(max_percentage=0.05)
+            #print('Done pulling data')
+            st1 = st.copy()
+            ###Finding triggers---------------------------------
+            if timing == 'trigger': #use sta/lta triggers
+                (st, trigger, peak, length, 
+                 trigger_type, trigger_time, 
+                 START_new, END_new)= triggers(st, short_window, long_window, 
+                                               on_threshold, off_theshold, 
+                                               moveout, min_triggers, 
+                                               ptolerance, START, 
+                                               window_start, WINDOW_LENGTH, 
+                                               multiple_triggers, no_triggers)
+                
+            ###Array processing---------------------------------
+            ##Least squares--------------------
+            if processing == 'lts' or processing == 'ls':
+                array_data = least_trimmed_squares(processing, st, sta_lats, sta_lons, 
+                                           WINDOW_LENGTH, WINDOW_OVERLAP,
+                                           trigger_time, trigger_type, peak,
+                                           length, origin_lat, origin_lon, 
+                                           event_id, eq_baz_real, eq_slow_real)
+                
+                
+            else: #fk analysis
+                
+                array_data = fk_obspy(st1, stations, sta_lats, sta_lons, sta_elev, START, START_new, END_new,
+                                      WINDOW_LENGTH, WINDOW_OVERLAP, FREQ_MIN, FREQ_MAX,
+                                      sll_x, slm_x, sll_y, slm_y, sl_s, semb_thres, vel_thres, timestamp, prewhiten,
+                                      eq_baz_real, eq_slow_real, event_id, trigger, trigger_type, peak, length, origin_lat, origin_lon)
+                
+        
+            array_data_list.append(array_data)
+            print('Events completed:', str(event+1)+'/'+str(len(df)))
+    
+        except ValueError as e:
+            print(f"Skipping event {event_ids[event]}: {e}")
+            #traceback.print_exc()
+            continue
+    
+        except Exception as e:
+            print(f"Unexpected error for event {event_ids[event]}: {e}")
+            #traceback.print_exc()
+            continue
+    
+    #Putting data into single dataframe----------------------
+    array_data_comb1 = pd.concat(array_data_list, ignore_index=True)
+    
+    array_data_comb = pd.merge(array_data_comb1, df, on='event_id', how='inner')
+    
+    
+    if save == True:
+        array_data_comb.to_csv(array_name+'_'+max_rad+'km_m3_fk_wawa.csv')
+        
+    return array_data_comb, station_info
+
+'''
+############################################################
+#### FUNCTIONS FOR PREPROCESSING ###########################
+############################################################
+
+
+
+def grab_preprocess(stations, station_info, inv, 
+                    net, loc, chan, min_stations, 
+                    START, END, client, array, event_id, path, 
+                    save_mseed = False):
+    
+    #Pull out specific station info
+    station_sub = station_info[station_info['station'].isin(stations)] 
+        
+    sta_lats = station_sub['lat'].to_numpy()
+    sta_lons = station_sub['lon'].to_numpy()
+    stations = station_sub['station'].to_numpy()
+    sta_elev = station_sub['elevation'].to_numpy()
+
+    try: #Try to pull event from locally
+        
+        #st = read('/Users/cadequigley/Downloads/Research/deployment_array_design/'+array+'_earthquakes_mseeds/'+event_id+".mseed")
+        st = read(path+event_id+'.mseed')
+        st = st.slice(START, END)
+        stations = set(tr.stats.station for tr in st)
+        station_sub = station_info[station_info['station'].isin(stations)]
+        
+        valid_stations = set(station_sub['station'])
+
+        # Remove traces not in station list
+        st = Stream([tr for tr in st if tr.stats.station in valid_stations])
+        #st = st.select(station=list(valid_stations))
+
+        sta_lats = station_sub['lat'].to_numpy()
+        sta_lons = station_sub['lon'].to_numpy()
+        stations = station_sub['station'].to_numpy()
+        sta_elev = station_sub['elevation'].to_numpy()
+            #st = read('/Users/cadequigley/Downloads/Research/'+array+'_earthquakes_mseeds/'+event_ids[event]+".mseed")
+    except FileNotFoundError:
+        print('File not found locally, trying to pull from IRIS')
+        
+        st = Stream()
+        failed_stations = []
+
+        for sta in stations:
+            try:
+                st += client.get_waveforms(net, sta, loc, chan, START, END)
+            except FDSNNoDataException:
+                print(f"No data for station {sta}")
+                failed_stations.append(sta)
+            except Exception as e:
+                print(f"Error for station {sta}: {e}")
+                failed_stations.append(sta)
+
+        # Remove stations that did not have data from metadata
+        if failed_stations:
+            mask = ~np.isin(stations, failed_stations)
+            stations = stations[mask]
+            sta_lats = sta_lats[mask]
+            sta_lons = sta_lons[mask]
+            sta_elev = sta_elev[mask]
+            
+        # Check to see if there are enough stations----
+        if len(st) < min_stations:
+            raise ValueError("Not enough traces")
+        
+        if save_mseed == True:
+            st.sort()
+            st.write(path+event_id+".mseed", format="MSEED")
+            print('mseed saved')
+
+
+    # Basic data preperation-----------    
+    st.merge(fill_value='latest')
+    st.trim(START, END, pad='true', fill_value=0)
+    st.sort()
+    
+    st.remove_sensitivity(inventory = inv)
+
+        # Filter the data
+    #st.filter("bandpass", freqmin=FREQ_MIN, freqmax=FREQ_MAX, 
+                #corners=2, zerophase=True)
+        
+    st.taper(max_percentage=0.05)
+    
+    return st, stations, sta_lats, sta_lons, sta_elev
+
+
+
+def moveout_time(output):
+    '''
+    Calculates the minimum moveout time across the array based on maximum
+    interstation distacne and velocity, including some wiggle room
+    
+    Parameters:
+        output: output from get_geometry function. Contains interstation
+          distances
+
+    Returns: 
+        moveout: expected moveout time in seconds (float)
+        
+        
+    '''
+    #### Calculate interstation distances/moveout time
+    xpos = list(output[:,0])
+    xpos = xpos[:-1]
+    ypos = list(output[:,1])
+    ypos = ypos[:-1]
+    distances_temp = interstation_distances(xpos, ypos)
+    moveout = (np.max(distances_temp)/3)+0.5 #t = d/v + error
+    return moveout
+
+def array_time_window(use_full_deployment, start_d1_list, end_d1_list,
+                      starttime, endtime):
+    '''
+    Defines what dates to look for earthquakes based on active stations
+    
+    Parameters:
+        use_full_deployment: whether to use full time window deployment was
+            out (True or False)
+        start_d1_list: list of start times for each station
+        end_d1_list: list of end times for each station
+        starttime: specified starttime, will use if use_full_deployment = True
+        endtime: speficied endtime, will use if use_full_deployment = True
+
+    Returns: 
+        start: start time to look for earthquakes
+        end: end time to look for earthquakes
+        
+        
+    '''
+    if use_full_deployment ==True:
+        start = str(np.min(start_d1_list)) #time when first station online
+        if str(type(end_d1_list[0])) == "<class 'NoneType'>": #deals with case where station/array is still active by taking time today
+            end_temp = UTCDateTime.now()
+            end = str(end_temp)
+            temp = []
+            for i in range(len(end_d1_list)):
+                temp.append(end_temp)
+            end_d1_list = temp
+        else:
+            end = str(np.max(end_d1_list)) #time when last station offline
+
+    else: #use restricted time window specified at start
+        start = starttime
+        end = endtime
+    
+    return start, end
+
+
+def rotate_channel(st, inv, channel): ###NEED TO FINISH-------------
+    for i in range(len(st)):
+        tr = st[i]
+        if channel[:-1] == 'Z':
+            if inv[0][i].channels[0].dip == 90:
+                tr.data = -1*tr.data
+        elif channel[:-1] == 'N':
+            if inv[0][i].channels[0].azimuth == 180:
+                tr.data = -1*tr.data
+        elif channel[:-1] == 'E':
+            if inv[0][i].channels[0].azimuth == 270:
+                tr.data = -1*tr.data
+
 def calculate_slowness(distance_km, depth, velocity_model):
 
     """
-    Calculates the slowness of an event based on known information about hypocenter. This is 
-    a 1D calculation using the Taup calculator (Crotwell et al.)
+    Calculates the slowness of an event based on known information about
+    hypocenter. This is a 1D calculation using the Taup calculator 
+    (Crotwell et al.)
     
     Parameters:
         distance_km: epicentral distance to event in km
         depth: depth of event in km
-        velocity_model: velocity model to use for slowness calculation ('iasp91', 'ak135', 'pavdut', 'japan_1d', '')
+        velocity_model: velocity model to use for slowness calculation
+          ('iasp91', 'ak135', 'pavdut', 'japan_1d', '')
         
     Returns:
         slowness: expected slowness at surface (s/km)
@@ -67,7 +734,22 @@ def calculate_slowness(distance_km, depth, velocity_model):
 
     return slowness, trace_vel, incident_angle, p_arrival
 
-def data_from_inventory(inv, remove_stations):
+def misbehaving_stations_lts(d, threshold=4):
+    """
+    Returns a list of values that appear more than `threshold` times
+    in the first array-like value found in the dictionary `d`.
+    Ignores non-array entries like 'size'.
+    """
+    # Find the first array in the dictionary
+    for key, val in d.items():
+        if isinstance(val, (np.ndarray, list)):  # supports arrays or lists
+            arr = np.array(val)  # convert to numpy array if list
+            unique, counts = np.unique(arr, return_counts=True)
+            return unique[counts > threshold].tolist()
+    # Return empty if no array found
+    return []
+
+def data_from_inventory(inv, remove_stations, keep_stations):
 
     """
     Pulls pertinent information out of an inventory for arrays.
@@ -102,7 +784,10 @@ def data_from_inventory(inv, remove_stations):
             station_list.append(station.code)
             elev_list.append(station.elevation)
             start_list.append(station.start_date)
-            end_list.append(station.end_date)
+            if station.end_date == None:
+                end_list.append(UTCDateTime.now())
+            else:
+                end_list.append(station.end_date)
             num_channels_list.append(station.total_number_of_channels)
             
     if len(remove_stations) > 0: 
@@ -117,11 +802,37 @@ def data_from_inventory(inv, remove_stations):
             del end_list[idx]
             del num_channels_list[idx]
 
+    if len(keep_stations) > 0:
+
+        mask = [sta in keep_stations for sta in station_list]
+
+        lat_list = [lat_list[i] for i in range(len(mask)) if mask[i]]
+        lon_list = [lon_list[i] for i in range(len(mask)) if mask[i]]
+        station_list = [station_list[i] for i in range(len(mask)) if mask[i]]
+        elev_list = [elev_list[i] for i in range(len(mask)) if mask[i]]
+        start_list = [start_list[i] for i in range(len(mask)) if mask[i]]
+        end_list = [end_list[i] for i in range(len(mask)) if mask[i]]
+        num_channels_list = [num_channels_list[i] for i in range(len(mask)) if mask[i]]
+
         
 
-    return lat_list, lon_list, elev_list, station_list, start_list, end_list, num_channels_list
+    return (lat_list, lon_list, elev_list, station_list, start_list, end_list,
+             num_channels_list)
+
 
 def check_num_stations(min_stations, station_list):
+    '''
+    Checks if the minimum number of stations is met.
+    
+    Parameters:
+        min_stations: minimum stations wanted
+        station_list: list of stations
+
+    Returns: 
+        ValueError if not enough stations
+        
+        
+    '''
     num_stations = len(station_list)
     if num_stations < min_stations:
         raise ValueError("The minimum stations is greater then the number of available stations.")
@@ -131,6 +842,7 @@ def get_geometry(lat_list, lon_list, elev_list, return_center = False):
 
     """
     Gets the geometry of the array in terms of meters from a center point.
+    This is slightly modified from obpsy.geotools.get_geometry
     
     Parameters:
         lat_list: list of station latitudes
@@ -168,29 +880,61 @@ def get_geometry(lat_list, lon_list, elev_list, return_center = False):
     else:
         return geometry
 
-def utc2datetime(utctime): #utc time as string
-    return dt.datetime(int(utctime[0:4]),int(utctime[5:7]), int(utctime[8:10]), int(utctime[11:13]),int(utctime[14:16]),int(utctime[17:19]))
-    
-def is_between(check, start, end): #Returns true/false based on whether time is between two values
-    """
-    Checks if a time is between two other times. Useful for determining what stations to use.
+def interstation_distances(xpos, ypos):
+    points = np.column_stack((xpos, ypos))  # shape (N, 2)
+
+    dx = points[:, 0][:, None] - points[:, 0][None, :]
+    dy = points[:, 1][:, None] - points[:, 1][None, :]
+
+    distances = np.sqrt(dx**2 + dy**2)
+    return distances
+
+def utc2datetime(utctime): 
+    '''
+    Converts string of utctime to datetime
     
     Parameters:
-        check: time to test
-        start: start time data
-        end:
-        
-    Returns:
-        True or False            
-    """
-    return start <= check <= end
+        utctime: time in utc (string)
 
-def pull_earthquakes(lat, lon, max_rad, start, end, min_mag, array_name, velocity_model):
+    Returns: 
+        datetime object
+        
+        
+    '''
+    return (dt.datetime(int(utctime[0:4]),int(utctime[5:7]), int(utctime[8:10]),
+                int(utctime[11:13]),int(utctime[14:16]),int(utctime[17:19])))
+    
+
+
+def baz_error(baz_real, baz_calculated):
+    '''
+    Calculates backazimuth error between catalog baz and array baz
+    
+    Parameters:
+        baz_real: catalog backazimuth
+        baz_calculated: array calculated backazimuth
+
+    Returns: 
+        baz_error: catalog baz - array baz
+        
+        
+    '''
+    baz_error_temp = baz_real - baz_calculated
+    baz_error = ((baz_error_temp + 180) % 360) - 180
+    return baz_error
+
+
+############################################################
+#### FUNCTIONS FOR PULLING EARTHQUAKES ###########################
+############################################################
+def pull_earthquakes(lat, lon, max_rad, start, end, min_mag, array_name,
+                    velocity_model):
 
     """
     Pulls in earthquakes from a region based on lat, lon, timing, and magnitude.
-    It also returns other values of interest about the event for array processing,
-    such as backazimuth, slowness, and epicentral distance to the event.
+    It also returns other values of interest about the event for array 
+    processing, such as backazimuth, slowness, and epicentral distance to the
+    event.
     
     Parameters:
         lat: latitude of array/station (str)
@@ -262,11 +1006,20 @@ def pull_earthquakes(lat, lon, max_rad, start, end, min_mag, array_name, velocit
         name= name[8:]
 
         #Calculate distance, backazimuth
-        dist, baz, az = gps2dist_azimuth(float(lat), float(lon), latitude, longitude)
+        dist, baz, az = gps2dist_azimuth(float(lat), float(lon), 
+                                         latitude, longitude)
         dist = dist/1000 #converts m to km
-        
-        #Calculate slowness, trace velocity, incident angle, and arrival time
-        slow, t_vel, incident, p = calculate_slowness(dist, depth, velocity_model)
+
+        if depth < 0:
+            slow = 0
+            t_vel = 0
+            incident = 0
+            p = 0
+        else:
+            #Calculate slowness, trace velocity, incident angle, and arrival time
+            slow, t_vel, incident, p = calculate_slowness(dist, 
+                                                          depth,
+                                                          velocity_model)
         
         # Append data to lists
         depths.append(depth)
@@ -305,7 +1058,40 @@ def pull_earthquakes(lat, lon, max_rad, start, end, min_mag, array_name, velocit
     df = pd.DataFrame(data)
     return df
 
-def stations_available_generator(earthquake_time_list, station_d1_list, start_d1_list, end_d1_list):
+def stations_available_generator(earthquake_time_list, station_d1_list,
+                                start_d1_list, end_d1_list):
+    '''
+    Finds which stations are available for each earthquake.
+    
+    Parameters:
+        earthquake_time_list: list of earhtquake times (UTC)
+        station_d1_list: list of all stations
+        start_d1_list: list of start times for each station
+        end_d1_list: list of end times for each station
+        
+
+    Returns: 
+        station_lists: list of different stations available for each event
+        stations_available: number of stations available for each earthquake
+        
+        
+    '''
+
+    def is_between(check, start, end): 
+        """
+        Checks if a time is between two other times. Useful for determining what
+        stations to use.
+        
+        Parameters:
+            check: time to test
+            start: start time data
+            end:
+            
+        Returns:
+            True or False            
+        """
+        return start <= check <= end
+
     stations_lists = []
     stations_available = []
     for i in range(len(earthquake_time_list)): #setting up earthquakes to loop through
@@ -332,50 +1118,304 @@ def stations_available_generator(earthquake_time_list, station_d1_list, start_d1
         
     return stations_lists, stations_available
 
+############################################################
+#### FUNCTIONS FOR STA/LTA TRIGGERS ###########################
+############################################################
 
-def baz_error(baz_real, baz_calculated):
-    baz_error_temp = baz_real - baz_calculated
-    baz_error = ((baz_error_temp + 180) % 360) - 180
-    return baz_error
-
+def trigger_list(tr, short_window, long_window, on_threshold, off_theshold):
+    '''
+    Calculates triggers in a station trace using classic sta/lta
     
+    Parameters:
+        trace: trace for a single station
 
-def trigger_associator(st, estimated_p_arrival):
+    Returns: 
+        trigger_times: list of triggers (seconds since start)
+        trigger_peaks: list of sta/lta peak values
+        trigger_lengths: list of length of trigger
+        
+        
+    '''
+    sr = tr.stats.sampling_rate
+    #cft = classic_sta_lta(tr.data, int(2.5 * sr), int(30. * sr))
+    #on_of = trigger_onset(cft, 2.5, 1.0)
+    cft = classic_sta_lta(tr.data, int(short_window * sr),
+                          int(long_window * sr))
+    on_of = trigger_onset(cft, on_threshold, off_theshold)
+
+    trigger_times = []
+    trigger_peaks = []
+    trigger_lengths = []
+
+    for on, off in on_of:
+        # time of trigger (seconds from trace start)
+        trigger_time = on / sr
+        trigger_times.append(trigger_time)
+
+        # peak STA/LTA value in that window
+        #print(len(cft[on:off]))
+        #peak_value = np.max(cft[on:off])
+        if len(cft[on:off]) > 0:
+            peak_value = np.max(cft[on:off])
+        else:
+            peak_value = 0
+
+        trigger_peaks.append(peak_value)
+
+        # window duration in seconds
+        window_length = (off - on) / sr
+        trigger_lengths.append(window_length)
+
+    return trigger_times, trigger_peaks, trigger_lengths
+
+
+def triggers_associator(trigger_lists, peak_lists, length_lists,
+                        moveout, min_stations):
+
+    time_groups = []
+    peak_groups = []
+    length_groups = []
+
+    for i in range(len(trigger_lists)):
+        triggers = trigger_lists[i]
+        peaks = peak_lists[i]
+        lengths = length_lists[i]
+
+        comparison_times = trigger_lists[:i] + trigger_lists[i+1:]
+        comparison_peaks = peak_lists[:i] + peak_lists[i+1:]
+        comparison_lengths = length_lists[:i] + length_lists[i+1:]
+
+        for k in range(len(triggers)):
+
+            target_time = triggers[k]
+            target_peak = peaks[k]
+            target_length = lengths[k]
+
+            group_times = [target_time]
+            group_peaks = [target_peak]
+            group_lengths = [target_length]
+
+            for l in range(len(comparison_times)):
+                comp_times = comparison_times[l]
+                comp_peaks = comparison_peaks[l]
+                comp_lengths = comparison_lengths[l]
+
+                for t in range(len(comp_times)):
+                    test_time = comp_times[t]
+
+                    if abs(target_time - test_time) < moveout:
+                        group_times.append(test_time)
+                        group_peaks.append(comp_peaks[t])
+                        group_lengths.append(comp_lengths[t])
+
+            group_times.sort()
+
+            if len(group_times) > min_stations:
+                time_groups.append(group_times)
+                peak_groups.append(group_peaks)
+                length_groups.append(group_lengths)
+
+    # Remove duplicates
+    unique = list(set(tuple(tg) for tg in time_groups))
+
+    trigger_times = []
+    trigger_peaks = []
+    trigger_lengths = []
+
+    for group in unique:
+
+        group = list(group)
+
+        if abs(np.max(group) - np.min(group)) < moveout:
+
+            idx = time_groups.index(group)
+
+            median_time = np.median(group)
+
+            # strength metric
+            cluster_peak = np.median(peak_groups[idx]) #np.sum
+
+            # length metric (choose what you prefer)
+            cluster_length = np.mean(length_groups[idx])  # recommended
+
+            trigger_times.append(median_time)
+            trigger_peaks.append(cluster_peak)
+            trigger_lengths.append(cluster_length)
+
+    sorted_idx = np.argsort(trigger_times)
+
+    return (
+        np.array(trigger_times)[sorted_idx],
+        np.array(trigger_peaks)[sorted_idx],
+        np.array(trigger_lengths)[sorted_idx]
+    )
+
+
+def triggers(st, short_window, long_window, on_threshold, off_theshold, 
+             moveout, min_triggers, ptolerance,
+             START, window_start, WINDOW_LENGTH, FREQ_MIN, FREQ_MAX, 
+             trig_freq_min, trig_freq_max,
+             multiple_triggers, mseed_length, 
+             timing = 'trigger', no_triggers = None, 
+             analysis_type = 'single_point', time_series_start = None, 
+             time_series_end = None): # analysis_type, time_series_start, time_series_end
+    '''
+    Combines the different trigger functions (trigger_lists, 
+    triggers_associator) into a single function.
     
-    expected = estimated_p_arrival  # seconds
-    tolerance = 10.0     # seconds
+    Parameters:
+        st: obspy stream containing traces
+        moveout: expected moveout time across the array (seconds) (float)
+        min_triggers: minimum picks to associate into a trigger (int)
+        ptolerance: seconds around p-pick to allow association (float)
+        START: start time of stream (UTCDateTime)
+        window_start: where in time (seconds) to start analysis relative to 
+            p-pick (float)
+        WINDOW_LENGTH: window length of array analysis window (seconds)
+        multiple_triggers: how to handle multiple triggers ('peak' or 'closest')
 
-    trigger_list = []
+    Returns: 
+        st: stream that is trimmed based on trigger time and other parameters
+        trigger: trigger time relative to start time (seconds)
+        peak: STA/LTA ratio of nearest peak to trigger
+        length: length of STA/LTA trigger duration
+        trigger_type: 
+            'STA/LTA': single STA/LTA trigger
+            'Multiple triggers': multiple triggers, chosen based on multiple
+                 triggers input
+            'Taup': no STA/LTA trigger, using Taup time and larger window 
+                to search
+        trigger_time: trigger time (str)
+        START_new: start time of new stream
+        END_new: end time of new stream
+    '''
+    #Filter stream according to EPIC for calculating trigger times
+    st_trig = st.copy()
+    st_trig.filter("bandpass", freqmin=trig_freq_min, freqmax=trig_freq_max, 
+                corners=2, zerophase=True)
+    
+    #Filter stream according to array processing input
+    st.filter("bandpass", freqmin=FREQ_MIN, freqmax=FREQ_MAX, 
+                corners=2, zerophase=True)
+    trigger_lists = []
+    trigger_peaks = []
+    trigger_lengths = []
+    for s in range(len(st)):
+        times, peaks, lengths = trigger_list(st[s], short_window, long_window,
+                                              on_threshold, off_theshold)
+        trigger_lists.append(times)
+        trigger_peaks.append(peaks)
+        trigger_lengths.append(lengths)
 
-    for k in range(len(st)):
-        tr = st[k]
-        sr = tr.stats.sampling_rate
-        cft = classic_sta_lta(tr.data, int(2.5 * sr), int(30. * sr)) #classic sta/lta
-        on_of = trigger_onset(cft, 2.5, 1.0) #1.7, 1.0
 
-        if len(on_of) > 0: 
-            for i in range(len(on_of)):
-                triggers = on_of[:, 0]/sr #triggers
+    # Associate triggers together based on expected moveout------------
             
-                mask = np.abs(triggers - expected) <= tolerance
-                trigger_filtered = triggers[mask]
-                if len(trigger_filtered) >0:
-                    trigger_list.append(trigger_filtered[0])
+
+    times, peaks, lengths = triggers_associator(trigger_lists, 
+                                                trigger_peaks, 
+                                                trigger_lengths, 
+                                                moveout, min_triggers)
             
+    times = np.array(times)
+    peaks = np.array(peaks)
+    lengths = np.array(lengths)
+    # Create mask to find triggers around expected p-arrival---------
+    mask = np.abs(times - (mseed_length/2)) <= ptolerance
+    trigger_filtered = times[mask]
+    peaks_filtered = peaks[mask]
+    lengths_filtered = lengths[mask]
+
+    #if analysis_type == 'single_point':      
+    #-------NO TRIGGERS-------------------
+    if len(trigger_filtered) == 0: #no triggers around p-pick
+        trigger = mseed_length/2 
+        trigger_type = 'Taup'
+        peak = 0
+        length = 0
+        #Trim stream to allow for search for cross correlation
+        if timing == 'trigger':
+            if no_triggers == 'max mdccm':
+                print('Pulling max mdccm')
+                START_new = START + trigger + window_start- 0.001 - ptolerance
+                END_new = START_new + 2*ptolerance
+                
+            elif no_triggers == 'taup':
+                START_new = START + trigger + window_start- 0.001
+                END_new = START_new + WINDOW_LENGTH
+                
+        elif timing == 'power':
+            print('Pulling max mdccm')
+            START_new = START + trigger + window_start- 0.001 - ptolerance
+            END_new = START_new + 2*ptolerance
+            
+
+
+    #-------MULTIPLE TRIGGERS-------------------
+    elif len(trigger_filtered) >1: #multiple triggers around p-pick
+        
+        trigger_type = 'Multiple triggers'
+
+        if multiple_triggers == 'peak':
+            ####CHOOSING TRIGGER WITH LARGER PEAK-
+            idx = np.argmax(peaks_filtered)
+            
+        elif multiple_triggers == 'closest': 
+            ###CHOOSING TRIGGER CLOSEST TO EXPECTED ARRIVAL
+            idx = np.argmin(np.abs(trigger_filtered - mseed_length/2)) #60))
+
+        elif multiple_triggers == 'first':
+            ###CHOOSING TRIGGER CLOSEST TO EXPECTED ARRIVAL
+            idx = np.argmin(trigger_filtered)
+            
+        
+        trigger = trigger_filtered[idx]
+        #print('Trigger:', trigger)
+        peak = peaks_filtered[idx]
+        length = lengths_filtered[idx]
+
+        #Handle for whether single point analysis is from trigger or power       
+        if timing == 'trigger': #analysis based on timing
+            #Trim stream to window of interest-------------
+            START_new = START + trigger + window_start- 0.001
+            END_new = START_new + WINDOW_LENGTH
+            
+        elif timing == 'power': #Find max power in a tolerance window
+            #Trim stream to window of interest-------------
+            START_new = START + trigger + window_start- 0.001 - ptolerance
+            END_new = START_new + 2*ptolerance
+            
+            
+    #-------SINGLE TRIGGER-------------------
+    else: #there is only a single trigger
+        trigger = trigger_filtered[0]
+        peak = peaks_filtered[0]
+        length = lengths_filtered[0]
+        trigger_type = 'STA/LTA trigger'
+        if timing == 'trigger':
+            #Trim stream to window of interest-------------
+            START_new = START + trigger + window_start- 0.001
+            END_new = START_new + WINDOW_LENGTH
+            
+        elif timing == 'power':
+            #Trim stream to window of interest-------------
+            START_new = START + trigger + window_start- 0.001 - ptolerance
+            END_new = START_new + 2*ptolerance
+
+    print(trigger_type)
+
+   
+    #Case for doing time series analysis
+    if analysis_type == 'time_series':
+        START_new = START + trigger + time_series_start
+        END_new = START + trigger + time_series_end
     
+    
+    st = st.slice(START_new, END_new)
 
-    if len(trigger_list) > 5:
-        trigger = np.median(trigger_list)
-        trigger_type = 'trigger'
-    else:
-        trigger = expected
-        trigger_type = 'estimated'
-    return trigger, trigger_type
+    trigger_time = str(START+trigger)
 
-def rotate_channel(st):
-    if stats.channel[-1] == 'Z':
-        data = -data
-
+    return (st, trigger, peak, length, trigger_type, trigger_time, 
+            START_new, END_new)
 
 
 ############################################################
@@ -411,12 +1451,14 @@ def plane_normal(dip, strike):
 
 def spherical_to_xyz(azimuth, takeoff):
     """
-    Converts azimuth (0-360°, clockwise from North) and takeoff angle (0-90°, from vertical)
-    to a unit 3D direction vector [x, y, z].
+    Converts azimuth (0-360°, clockwise from North) and takeoff angle (0-90°,
+    from vertical) to a unit 3D direction vector [x, y, z].
 
     Parameters:
-        azimuth_deg: float — azimuth angle in degrees, clockwise from North (Y+ axis)
-        takeoff_deg: float — takeoff angle in degrees, 0° = vertical up, 90° = horizontal
+        azimuth_deg: float — azimuth angle in degrees, clockwise from North
+            (Y+ axis)
+        takeoff_deg: float — takeoff angle in degrees, 0° = vertical up, 
+            90° = horizontal
 
     Returns:
         np.array([x, y, z]) — unit direction vector
@@ -470,7 +1512,8 @@ def snell_3d(incident, normal, v1, v2):
 
 def deflection_xy(incident, refracted): #analogous with baz error
     """
-    Calculates the angle between the incident wave and refracted wave in the x-y plane
+    Calculates the angle between the incident wave and refracted wave in the
+    x-y plane
     Args:
         incident: incident vector (3 component np.array)
         refracted: refracted vector (3 component np.array)
@@ -495,7 +1538,8 @@ def deflection_xy(incident, refracted): #analogous with baz error
 def deflection_yz(incident, refracted):
     """
     Args:
-    Calculates the angle between the incident wave and refracted wave in the y-z plane
+    Calculates the angle between the incident wave and refracted wave in the
+    y-z plane
     
         incident: incident vector (3 component np.array)
         refracted: refracted vector (3 component np.array)
@@ -517,9 +1561,7 @@ def deflection_yz(incident, refracted):
 
     return angle_deg
 
-### Trying some new deflections in slowness plane
 
-### Function to rotate refracted ray back into azimuth-normal plane
 def rotate_about_z(v, angle_deg): ##v is a vector, angle_deg is the backazimuth error rotation
     angle = np.radians(angle_deg)
     R = np.array([
@@ -529,23 +1571,26 @@ def rotate_about_z(v, angle_deg): ##v is a vector, angle_deg is the backazimuth 
     ])
     return R @ v
 
-## Function to calculate incidence angle from vector
+
 def incidence_angle(v): #incidence angle from vertical 
     v = v / np.linalg.norm(v)
     return np.degrees(np.arccos(v[2]))  # z = up
 
-### Definition of horizontal slowness
+
 def horizontal_slowness(v, velocity): #v is vector, velocity is p-wave velocity of medium
     v = v / np.linalg.norm(v)
     theta = np.arccos(v[2])
     return np.sin(theta) / velocity
 
 
-def calculate_deflection(strike, dip, oceanic_vel, continental_vel, distance_list, depth_list, azimuth_list, baz_list, event_id_list):
+def calculate_deflection(strike, dip, oceanic_vel, continental_vel, 
+                         distance_list, depth_list, takeoff_list, azimuth_list,
+                         baz_list, event_id_list):
 
     """
     Args:
-    Calculates forward model for deflection from snell 3D functions given an orientation of a dipping plane. 
+    Calculates forward model for deflection from snell 3D functions given an
+      orientation of a dipping plane. 
 
     strike: strike of plane (degrees from north)
     dip: dip of plane (degrees down from horizontal)
@@ -569,14 +1614,17 @@ def calculate_deflection(strike, dip, oceanic_vel, continental_vel, distance_lis
     """
     #Calculate takeoff angle from depth
     takeoff = (np.rad2deg(np.arctan(np.array(distance_list)/np.array(depth_list))))
-
+    takeoff = np.array(takeoff_list)
+    #takeoff = np.ones(len(takeoff))*20
     ### data to be saved--------------------
     event_id = np.array(event_id_list)
 
     ##Input data to be used------------------ 
     baz = np.array(baz_list)
+    #baz = np.linspace(0,360, len(baz))
     #az = baz_to_az(baz) #from functions list
     az = np.array(azimuth_list)
+    #az = np.linspace(0,360, len(az))
 
     ##Calculate deflection-----------------
     normal = plane_normal(dip, strike)
@@ -642,15 +1690,182 @@ def cos_model(Z_deg, a, b, phi_deg):
     return a - b * np.cos(Z - phi)
 
 
+
+
+def niazi_dip_inversion(baz, slowness, slow_error, strike, crust_vel):
+    
+    from scipy.optimize import minimize
+
+    '''
+    # -------------------------------------------------------
+    # Example observed data
+    # -------------------------------------------------------
+    # event backazimuths (direction waves arrive FROM)
+    baz = np.array([10, 40, 80, 120, 170, 210, 250, 300])
+
+    # observed slowness residuals (s/km)
+    # (measured - predicted from reference Earth model)
+    slow_resid = np.array([0.02, 0.05, 0.08, 0.03,
+                        -0.01, -0.04, -0.07, -0.03])
+
+    # -------------------------------------------------------
+    # Known / assumed parameters
+    # -------------------------------------------------------
+    strike = 188.4          # degrees
+    incident_angle = 25.0   # representative incident angle
+    vp_upper = 6.5          # km/s
+    vp_lower = 8.0          # km/s
+    '''
+    # -------------------------------------------------------
+    # Simple forward model
+    # -------------------------------------------------------
+    # This is NOT the full Niazi equation,
+    # but demonstrates the inversion concept.
+    #
+    # Key idea:
+    # residual amplitude depends on:
+    #   - dip angle
+    #   - arrival direction relative to strike
+    #   - incident angle
+    # -------------------------------------------------------
+
+    def incident_angle_from_slowness(slowness, crust_vel):
+        
+        p = np.median(slowness)
+        print('Median slowness', p)
+
+        incident_angle = np.degrees(np.arcsin(p * crust_vel))
+
+        print('Incident angle', incident_angle)
+        return incident_angle
+    
+    def predict_residuals(dip_deg, baz_deg,
+                        strike_deg,
+                        incident_angle_deg):
+        
+        # relative arrival direction
+        theta = np.radians(baz_deg - strike_deg)
+
+        dip = np.radians(dip_deg)
+        inc = np.radians(incident_angle_deg)
+
+        # simple sinusoidal prediction
+        # (captures directional dependence)
+        #pred = np.tan(dip) * np.cos(theta) * np.sin(inc)
+        pred = np.tan(dip) * np.sin(theta) * np.sin(inc)
+
+        return pred
+
+    incident_angle = incident_angle_from_slowness(slowness, crust_vel)
+    # -------------------------------------------------------
+    # Misfit function
+    # -------------------------------------------------------
+
+    def misfit(dip_deg):
+        pred = predict_residuals(
+            dip_deg,
+            baz,
+            strike,
+            incident_angle
+        )
+
+        return np.sum((slow_error - pred)**2)
+
+
+    # -------------------------------------------------------
+    # Find best-fitting dip angle
+    # -------------------------------------------------------
+
+    result = minimize(
+        misfit,
+        x0=30.0,           # initial guess
+        bounds=[(0, 90)]  # search range in degrees
+    )
+
+    best_dip = result.x[0]
+
+    print(f"Best-fitting dip angle: {best_dip:.2f} degrees")
+    return best_dip
+
+
+def fourier5(theta,
+             a0,
+             a1,b1,
+             a2,b2,
+             a3,b3,
+             a4,b4,
+             a5,b5):
+             #a6,b6,
+             #a7,b7,
+             #a8,b8):
+
+    return (
+            a0
+            + a1*np.cos(1*theta) + b1*np.sin(1*theta)
+            + a2*np.cos(2*theta) + b2*np.sin(2*theta)
+            + a3*np.cos(3*theta) + b3*np.sin(3*theta)
+            + a4*np.cos(4*theta) + b4*np.sin(4*theta)
+            + a5*np.cos(5*theta) + b5*np.sin(5*theta)
+            #+ a6*np.cos(6*theta) + b6*np.sin(6*theta)
+            #+ a7*np.cos(7*theta) + b7*np.sin(7*theta)
+            #+ a8*np.cos(8*theta) + b8*np.sin(8*theta)
+        )
+
+    
+    
+def anisotropy_model(theta,
+                     plunge_deg,
+                     A2,
+                     A1,
+                     phi1_deg,
+                     phi2_deg):
+
+    plunge = np.deg2rad(plunge_deg)
+
+        # phase shifts
+    phi1 = np.deg2rad(phi1_deg)
+    phi2 = np.deg2rad(phi2_deg)
+
+        # 2-theta component, anisotropy affect
+    term2 = (
+            A2
+            * np.cos(plunge)**2
+            * np.sin(2*(theta - phi2))
+        )
+
+        # 1-theta component, dipping plane effect
+    term1 = (
+            A1
+            * np.sin(2*plunge)
+            * np.sin(theta - phi1)
+            #np.sin(phi1-theta)
+        )
+
+    return term1 + term2
+
+def anisotropic_harmonic(baz, A, A1, A2, A3, A4):
+    baz = np.deg2rad(baz)
+    deviation = (A 
+                 + A1*np.sin(baz) 
+                 + A2*np.cos(baz)
+                 + A3*np.sin(2*baz)
+                 + A4*np.cos(2*baz)
+                )
+    
+    return deviation
+
+
 ############################################################
 #### FUNCTIONS FOR 3D SNELLS INVERSION ###########################
 ############################################################
 
-def combined_residuals(initial_guess, baz, takeoff, baz_error, slow_error, w_baz, w_p):
+def combined_residuals(initial_guess, baz, takeoff, baz_error, slow_error, 
+                       w_baz, w_p):
     
     """
     Args:
-    Calculates residuals between model and observed for different strike/dip/continental_vel/oceanic vel combinations
+    Calculates residuals between model and observed for different 
+    strike/dip/continental_vel/oceanic vel combinations
     
         p: list of guess values [strike, dip, v_oceanic, v_continental]; list
         baz: source baz from USGS catalog (degrees from north); numpy.array
@@ -693,7 +1908,8 @@ def combined_residuals(initial_guess, baz, takeoff, baz_error, slow_error, w_baz
         
         return np.hstack([w_baz * baz_res, w_p * p_res])
 
-def slab_inversion(initial_guess, bounds, source_baz, takeoff, baz_error, slow_error, weight_baz, weight_slow):
+def slab_inversion(initial_guess, bounds, source_baz, takeoff, baz_error, 
+                   slow_error, weight_baz, weight_slow):
     #####INVERSION######################################
 
     #Initial guess---------------------

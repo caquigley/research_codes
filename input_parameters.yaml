@@ -1,0 +1,83 @@
+# Station / network parameters------------
+network:
+  net: "9C"
+  sta: "2A*"
+  loc: "*"
+  chan: "SHZ"
+  client: "EARTHSCOPE" #"EARTHSCOPE"
+
+stations:
+  min_stations: 10 #10
+  remove_stations: [] #["2A12", "2A05", "2A09", "2A14"] #["POM06", "POM07", "POM18"] #['3A10', '3A15'] #["POM06", "POM07", "POM18"], []
+  keep_stations: []
+  array_name: "2A"
+  use_full_deployment: false
+  path_to_inventory: null
+  save_events: true
+  save_stations: false
+
+# MSEED parameters------------------------
+mseed:
+  save_mseed: false
+  mseed_path: "./2A_earthquakes_mseeds/"
+  mseed_length: 120
+
+# Earthquake search parameters------------
+earthquakes:
+  min_mag: 3.0
+  max_rad: 600 #600, 1800
+  velocity_model: "pavdut" #"ak135"
+  starttime: "2015-07-02" # "2015-06-23"
+  endtime: "2016-04-30"
+
+# Array processing parameters-------------
+array_processing:
+  processing: "lts"
+  freq_min: [3, 1.5, 0.75, 0.66, 0.5, 0.33] #0.5,1
+  freq_max: [20, 15, 10, 8, 6, 4] #10, 
+  window_length: [1.5, 2, 3, 4, 5, 6] #2, 0.5, 7, 6
+  window_step: 0.25 #0.25
+  window_start: -1 #-1, -2
+
+# STA/LTA trigger parameters--------------
+trigger:
+  timing: "trigger" #trigger, power
+  ptolerance: 5
+  multiple_triggers: "peak" #closest, peak, first
+  no_triggers: "max mdccm"
+  trig_freq_min: 1
+  trig_freq_max: 10
+  short_window: 0.05
+  long_window: 5
+  on_threshold: 20
+  off_threshold: 5
+  analysis_type: 'single_point' #single_point, time_series
+  time_series_start: -4 #seconds before trigger
+  time_series_end: 8 #seconds after trigger
+  use_EPIC_triggers: false
+
+# FK array processing-----------------------
+fk:
+  sll_x: -1.0
+  slm_x: 1.0
+  sll_y: -1.0
+  slm_y: 1.0
+  sl_s: 0.03
+  semb_thres: -1e9
+  vel_thres: -1e9
+  timestamp: "mlabday"
+  prewhiten: 0
+
+# Plots -----------------------
+plots:
+  earthquake_map: true
+  baz_error: true
+  slow_error: true
+  baz_error_map: true
+  slow_error_map: true
+  plot_histogram: false
+  save_fig: false
+  fig_path: './figures/'
+  drop_pow: false
+  pow_thresh: 0.5
+

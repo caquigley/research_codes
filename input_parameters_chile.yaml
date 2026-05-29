@@ -1,0 +1,80 @@
+# Station / network parameters------------
+network:
+  net: "5E"
+  sta: "S2*"
+  loc: "*"
+  chan: "HHZ"
+  client: "GEOFON" #"EARTHSCOPE"
+
+stations:
+  min_stations: 5
+  remove_stations: [] #["POM06", "POM07", "POM18"] #['3A10', '3A15'] #["POM06", "POM07", "POM18"], []
+  keep_stations: []
+  array_name: "S2"
+  use_full_deployment: false
+  path_to_inventory: null
+  save_events: false
+  save_stations: false
+
+# MSEED parameters------------------------
+mseed:
+  save_mseed: false
+  mseed_path: "./S3_earthquakes_mseeds/"
+  mseed_length: 120
+
+# Earthquake search parameters------------
+earthquakes:
+  min_mag: 4.0
+  max_rad: 200 #600
+  velocity_model: "iasp91" #"ak135"
+  starttime: "2011-05-11" # "2015-06-23"
+  endtime: "2013-05-01"
+
+# Array processing parameters-------------
+array_processing:
+  processing: "lts"
+  freq_min: 1 #0.5
+  freq_max: 10 #10
+  window_length: 10 #2, 0.5, 7, 6
+  window_step: 0.25 #0.25
+  window_start: -5 #-1, -2
+
+# STA/LTA trigger parameters--------------
+trigger:
+  timing: "power" #trigger, power
+  ptolerance: 5 #5
+  multiple_triggers: "peak" #closest, peak, first
+  no_triggers: "max mdccm"
+  trig_freq_min: 1
+  trig_freq_max: 10
+  short_window: 0.05
+  long_window: 5
+  on_threshold: 20
+  off_threshold: 5
+  analysis_type: 'single_point' #single_point, time_series
+  time_series_start: -4 #seconds before trigger
+  time_series_end: 8 #seconds after trigger
+  use_EPIC_triggers: false
+
+# FK array processing-----------------------
+fk:
+  sll_x: -1.0
+  slm_x: 1.0
+  sll_y: -1.0
+  slm_y: 1.0
+  sl_s: 0.03
+  semb_thres: -1e9
+  vel_thres: -1e9
+  timestamp: "mlabday"
+  prewhiten: 0
+
+# Plots -----------------------
+plots:
+  earthquake_map: true
+  baz_error: true
+  slow_error: true
+  baz_error_map: true
+  slow_error_map: true
+  plot_histogram: false
+  save_fig: false
+  fig_path: './figures/'
