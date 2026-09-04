@@ -5,7 +5,8 @@ from obspy.geodetics import gps2dist_azimuth
 from matplotlib.transforms import blended_transform_factory
 from array_functions import cos_model
 from scipy.optimize import curve_fit
-from array_functions import get_geometry, fourier5, anisotropy_model, anisotropic_harmonic
+from array_functions import (get_geometry, fourier5, anisotropy_model,
+                              anisotropic_harmonic, anisotropic_harmonic_reduced)
 
 
 
@@ -16,7 +17,7 @@ from array_functions import get_geometry, fourier5, anisotropy_model, anisotropi
 
 
 def record_section(st, stations, sta_lats, sta_lons, event, eq_lat, eq_lon, 
-                   mag, channel, plot_type):
+                   mag, channel, plot_type, trigger_time):
 
     fig, ax = plt.subplots(figsize = (10,8))
 
@@ -36,6 +37,8 @@ def record_section(st, stations, sta_lats, sta_lons, event, eq_lat, eq_lon,
                 fontweight = 'bold',fontsize = 10, ha="left", va="center")
     
     plt.axvline(x=0, color = 'red', linestyle = '--')
+    
+    plt.axvline(x = trigger_time, color = 'purple', linestyle = '--')
     distance = np.array(distance)
     ax.text(0.05, max(distance)+0.25,
             'Event: '+event+'; M'+str(mag)+'; '+channel,
@@ -145,8 +148,9 @@ def histogram(values, lower_quantile, upper_quantile, variable_name,
     plt.show()
 
 def stacked_histogram(raw_values, correct_values, lower_quantile, upper_quantile, variable_name, 
-              correct_values2 = None,save = False, path = None):
-    fig, ax = plt.subplots(figsize=(7, 3))
+              correct_values2 = None, correct_values3 = None, line_color = 'skyblue', save = False, path = None):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    
 
     if variable_name =='slowness_error':
         xlim1 = -0.1 #-1.3 # -0.2
@@ -191,16 +195,26 @@ def stacked_histogram(raw_values, correct_values, lower_quantile, upper_quantile
     ax.hist(raw_values, edgecolor = 'gray', histtype = 'step', **hist_params)
     range1 = (np.abs(np.quantile(raw_values, lower_quantile))+np.abs(np.quantile(raw_values, upper_quantile)))
     print('Quantile range raw:', range1)
+    print('Mean abs error raw:', np.mean(np.abs(raw_values)))
     #Plot corrected1------------
-    ax.hist(correct_values, edgecolor = 'skyblue',histtype = 'step', **hist_params)
+    ax.hist(correct_values, edgecolor = line_color,histtype = 'step', **hist_params)
     range2 = (np.abs(np.quantile(correct_values, lower_quantile))+np.abs(np.quantile(correct_values, upper_quantile)))
     print('Quantile range corrected:', range2)
+    print('Mean abs error corrected:', np.mean(np.abs(correct_values)))
+
+    if correct_values3 is not None:
+            #Plot corrected2------------
+            ax.hist(correct_values3, edgecolor = 'blue', histtype = 'step', **hist_params)
+            range4 = (np.abs(np.quantile(correct_values3, lower_quantile))+np.abs(np.quantile(correct_values3, upper_quantile)))
+            print('Quantile range corrected3:', range4)
 
     if correct_values2 is not None:
         #Plot corrected2------------
         ax.hist(correct_values2, edgecolor = 'red', histtype = 'step', **hist_params)
         range3 = (np.abs(np.quantile(correct_values2, lower_quantile))+np.abs(np.quantile(correct_values2, upper_quantile)))
         print('Quantile range corrected2:', range3)
+
+    
 
     ax.set_xlabel(label, fontsize=12)
     ax.set_ylabel('Count', fontsize=12)
@@ -211,6 +225,7 @@ def stacked_histogram(raw_values, correct_values, lower_quantile, upper_quantile
 
 
     ax.set_xlim(xlim1, xlim2)
+    #ax.set_ylim(0, 250)
     if save == True:
         fig.savefig(path, transparent=True, dpi=720)
 
@@ -220,79 +235,37 @@ def stacked_histogram(raw_values, correct_values, lower_quantile, upper_quantile
 
 
 def baz_error_spatial(baz, baz_error, baz_error_model, color_data, 
-                      color_data_label, niazi = True, save = False, 
+                      color_data_label, niazi = False, plot_fourier = False, 
+                      plot_anisotropic = False, plot_anisotropic_reduced = False,
+                      plot_bins = False, save = False, 
                       path = None):
 
     fig, ax = plt.subplots(figsize = (7,4))
     
     trans = blended_transform_factory(ax.transData, ax.transAxes)
-
-    if len(baz_error_model) > 0:
+    
+    models = [len(baz_error_model) > 0, niazi, plot_anisotropic_reduced, plot_anisotropic, plot_bins, plot_fourier]
+    if any(models):
         ax.scatter(baz, baz_error, color = 'gray', edgecolors = 'black',
-                   s = 100, label = 'measured')
-        ax.scatter(baz, baz_error_model, color = 'skyblue', edgecolors = 'black', 
-                   s = 100, label = 'modeled', alpha = 0.6)
+                s = 100, label = 'Observed', alpha = 0.8) #alpha = 0.4
+        if len(baz_error_model) > 0:
+            ax.scatter(baz, baz_error_model, color = 'skyblue', edgecolors = 'black', 
+                    s = 80, label = '3D Snell', marker = 'D', alpha = 0.4) #alpha = 0.8
+        
+        
+        
     else:
 
         if len(color_data) > 0:
-            sc = ax.scatter(baz, baz_error, c = color_data, cmap = 'plasma_r',
+            vmin = 0
+            vmax = 1
+            sc = ax.scatter(baz, baz_error, c = color_data, cmap = 'plasma_r',#'bwr',#'plasma_r',
                             edgecolors = 'black', s = 100)#vmin = 20, vmax = 40)
             fig.colorbar(sc, label = color_data_label)
         else:
-            ax.scatter(baz, baz_error, color = 'gray', alpha = 1, 
-                       edgecolors = 'black', s = 100, label = 'observed')
+            ax.scatter(baz, baz_error, color = 'gray',  alpha = 0.4,
+                       edgecolors = 'black', s = 100, label = 'observed' )
 
-    
-
-    if niazi == True:
-        
-        p0 = [1.0, 10.0, 180.0]   # a, b, phi guesses
-
-        Z_data = baz
-        y_data = baz_error
-        params, cov = curve_fit(cos_model, Z_data, y_data, p0=p0)
-        a_fit, b_fit, phi_fit = params
-        print('Strike from Niazi plot:', 180 + phi_fit)
-        #Plot niazi fit
-        Z_fit = np.linspace(0, 360, 500)
-        y_fit = cos_model(Z_fit, *params)
-        #ax.plot(Z_fit, y_fit, color = 'red', linewidth = 2.5, 
-                #label = 'Niazi fit', alpha= 0.5)
-    
-    #5th order polynomial---------------------
-    coefficients = np.polyfit(baz, baz_error, 5)
-    #print("Coefficients:", coefficients)
-
-    # 3. Create the polynomial function
-    polynomial = np.poly1d(coefficients)
-
-    # 4. Evaluate the polynomial at specific points
-    x_fit = np.linspace(0, 360, 1000)
-    y_fit = polynomial(x_fit)
-    #ax.plot(x_fit, y_fit, color = 'blue', label = 'Polynomial fit')
-
-    #Fourier fit------------------------------
-    theta = np.deg2rad(baz)
-
-    params, _ = curve_fit(fourier5, theta, baz_error)
-
-    # Smooth curve
-    theta_fit = np.linspace(0, 2*np.pi, 500)
-
-    y_fit = fourier5(theta_fit, *params)
-    #ax.plot(np.rad2deg(theta_fit), y_fit, color = 'red', linewidth = 2.5, 
-               # alpha= 0.8, label = 'Fourier fit')
-    #------------------------------------------------------
-    #Anisotropy model
-    
-    params, _ = curve_fit(anisotropy_model, theta, baz_error)
-    
-
-    # Smooth curve
-    theta_fit = np.linspace(0, 2*np.pi, 500)
-
-    y_fit = anisotropy_model(theta_fit, *params)
-    #ax.plot(np.rad2deg(theta_fit), y_fit, color = 'red', label = 'Anisotropy')
     #------------------------------------------------------
     #Binned statistics
     angles = baz
@@ -304,7 +277,7 @@ def baz_error_spatial(baz, baz_error, baz_error_model, color_data,
     counts = []
     bin_centers = []
 
-    min_count = 2
+    min_count = 1
 
     for i in range(len(bins)-1):
 
@@ -323,45 +296,117 @@ def baz_error_spatial(baz, baz_error, baz_error_model, color_data,
     medians = np.array(medians)
     counts = np.array(counts)
     bin_centers = np.array(bin_centers)
-    print('Medians', medians)
-    print('Counts', counts)
-    print('Bin centers', bin_centers)
-    ax.scatter(bin_centers, medians, color = 'red', s = 150, edgecolors='black', linewidths=1)
+    if plot_bins == True:
+        ax.scatter(bin_centers, medians, color = 'red', s = 150, edgecolors='black', linewidths=1, label = 'Median bins')
+
     
     #drop nan values
     mask = ~np.isnan(medians)
     medians = medians[mask]
     counts = counts[mask]
     bin_centers = bin_centers[mask]
+    
+
+    if niazi == True:
+        
+        p0 = [1.0, 10.0, 180.0]   # a, b, phi guesses
+        if plot_bins == True:
+            Z_data = bin_centers
+            y_data = medians
+        elif plot_bins == False:
+            Z_data = baz
+            y_data = baz_error
+        params, cov = curve_fit(cos_model, Z_data, y_data, p0=p0)
+        a_fit, b_fit, phi_fit = params
+        print('Strike from Niazi plot:', phi_fit) #180 + phi_fit
+        print(a_fit, b_fit, phi_fit)
+        #Plot niazi fit
+        Z_fit = np.linspace(0, 360, 500)
+        y_fit = cos_model(Z_fit, *params)
+        ax.plot(Z_fit, y_fit, color = 'green', linewidth = 2.5, 
+                label = 'Niazi fit', alpha= 0.5)
+    
+    #------------------------------------------------------
+    #Fourier fit------------------------------
+    if plot_fourier == True:
+        if plot_bins == True:
+            theta = np.deg2rad(bin_centers)
+            params, _ = curve_fit(fourier5, theta, medians)
+        elif plot_bins == False:
+            theta = np.deg2rad(baz)
+            params, _ = curve_fit(fourier5, theta, baz_error)
+
+        # Smooth curve
+        theta_fit = np.linspace(0, 2*np.pi, 500)
+
+        y_fit = fourier5(theta_fit, *params)
+        
+        ax.plot(np.rad2deg(theta_fit), y_fit, color = 'red', linewidth = 2.5, 
+                alpha= 1.0, label = 'Fourier fit')
+    
+    
     #------------------------------------------------------
     #Anisotropic harmonic
-    #params, _ = curve_fit(anisotropic_harmonic, baz, baz_error)
-    params, _ = curve_fit(anisotropic_harmonic, bin_centers, medians)
-    A1, A2, A3, A4, A5 = params
+    if plot_anisotropic == True:
+        #params, _ = curve_fit(anisotropic_harmonic, baz, baz_error)
+        if plot_bins == True:
+            params, _ = curve_fit(anisotropic_harmonic, bin_centers, medians)
+        if plot_bins == False:
+            params, _ = curve_fit(anisotropic_harmonic, baz, baz_error)
 
-    print('Anisotropic parameters:')
-    print('A1:', A1)
-    print('A2:', A2)
-    print('A3:', A3)
-    print('A4:', A4)
-    print('A5:', A5)
+        A1, A2, A3, A4, A5 = params
 
-    fast_dir = 0.5*np.arctan(A4/A5) + np.pi/4
-    print('Anisotropic fast direction:', np.rad2deg(fast_dir))
-    ani_amp = np.sqrt((A4**2) +(A5**2))
-    print('Anisotropic amplitude:', ani_amp)
+        print('Anisotropic parameters:')
+        print('A1:', A1)
+        print('A2:', A2)
+        print('A3:', A3)
+        print('A4:', A4)
+        print('A5:', A5)
 
-    dip_max = np.sqrt((A2**2)+(A3**2))
-    print('Dip amplitude:', dip_max)
+        fast_dir = 0.5*np.arctan(A4/A5) + np.pi/4
+        print('Anisotropic fast direction:', np.rad2deg(fast_dir))
+        ani_amp = np.sqrt((A4**2) +(A5**2))
+        print('Anisotropic amplitude:', ani_amp)
 
-    baz_fit = np.linspace(0, 360, 500)
+        dip_max = np.sqrt((A2**2)+(A3**2))
+        print('Dip amplitude:', dip_max)
 
-    y_fit = anisotropic_harmonic(baz_fit, *params)
-    ax.plot(baz_fit, y_fit, color = 'red', label = 'Anisotropic harmonic')
+        baz_fit = np.linspace(0, 360, 500)
 
+        y_fit = anisotropic_harmonic(baz_fit, *params)
+        
+        ax.plot(baz_fit, y_fit, color = 'blue', linewidth = 2.5, linestyle = 'dashdot', label = 'Anisotropic harmonic')
+
+    
+    #------------------------------------------------------
+    #Anisotropic harmonic reduced
+    if plot_anisotropic_reduced == True:
+        #params, _ = curve_fit(anisotropic_harmonic, baz, baz_error)
+        params, _ = curve_fit(anisotropic_harmonic_reduced, bin_centers, medians)
+        A1, A4, A5 = params
+
+        print('Anisotropic reduced parameters:')
+        print('A1:', A1)
+        #print('A2:', A2)
+        #print('A3:', A3)
+        print('A4:', A4)
+        print('A5:', A5)
+
+        fast_dir = 0.5*np.arctan(A4/A5) + np.pi/4
+        print('Anisotropic reduced fast direction:', np.rad2deg(fast_dir))
+        ani_amp = np.sqrt((A4**2) +(A5**2))
+        print('Anisotropic amplitude:', ani_amp)
+
+        baz_fit = np.linspace(0, 360, 500)
+
+        y_fit = anisotropic_harmonic_reduced(baz_fit, *params)
+        
+        ax.plot(baz_fit, y_fit, color = 'purple', label = 'Anisotropic harmonic reduced')
 
 
     #------------------------------------------------------
+    #General plotting
+
     ax.text(45,0.9, "NE", transform = trans, color = 'black', 
             fontweight = 'bold',fontsize = 15, ha='center')
     ax.text(135,0.9, "SE", transform = trans, color = 'black', 
@@ -377,21 +422,224 @@ def baz_error_spatial(baz, baz_error, baz_error_model, color_data,
     ax.axhline(y=0, color = 'red', linestyle = '--', alpha = 0.3)
 
     ax.grid(alpha = 0.3, zorder = 0)
-    ax.set_xlabel('catalog backazimuth (degrees)')
-    ax.set_ylabel('backazimuth error (degrees)')
+    ax.set_xlabel('catalog back azimuth (degrees)')
+    ax.set_ylabel('back azimuth error (degrees)')
     ax.set_xlim(0,360)
     #ax.set_ylim(-np.max(abs(baz_error)),np.max(abs(baz_error)))
     ax.set_ylim(-90,90) #-80, 80
-
+    #ax.set_ylim(-180, 180) #for supp. fig
     ax.invert_xaxis()
-    plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.25))
+    models = [niazi, plot_anisotropic_reduced, plot_anisotropic, plot_bins, plot_fourier]
+    if any(models):
+        plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.35))
     
     if save == True:
             fig.savefig(path, transparent=True, dpi=720)
-    #
     plt.show()
 
+def slow_error_spatial(baz, slow_error, slow_error_model, color_data, 
+                      color_data_label, niazi = False, plot_fourier = False, 
+                      plot_anisotropic = False, plot_anisotropic_reduced = False,
+                      plot_bins = False, save = False, 
+                      path = None):
 
+    fig, ax = plt.subplots(figsize = (7,4))
+    
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    models = [len(slow_error_model) > 0, niazi, plot_anisotropic_reduced, plot_anisotropic, plot_bins, plot_fourier]
+    if any(models):
+    #if len(baz_error_model) > 0:
+        ax.scatter(baz, slow_error, color = 'gray', edgecolors = 'black',
+                   s = 100, label = 'Observed', alpha = 0.8) #0.4
+        if len(slow_error_model) > 0:
+            ax.scatter(baz, slow_error_model, color = 'skyblue', edgecolors = 'black', 
+                    s = 80, label = '3D Snell', marker = 'D', alpha = 0.4) #0.8
+    else:
+
+        if len(color_data) > 0:
+            vmin = 0
+            vmax = 1
+            sc = ax.scatter(baz, slow_error, c = color_data, cmap = 'cividis_r',#'bwr',#'plasma_r',
+                            edgecolors = 'black', s = 100)#vmin = 20, vmax = 40)
+            fig.colorbar(sc, label = color_data_label)
+        else:
+            ax.scatter(baz, slow_error, color = 'gray', alpha = 0.4, 
+                       edgecolors = 'black', s = 100, label = 'observed')
+
+    #------------------------------------------------------
+    #Binned statistics
+    angles = baz
+    values = slow_error
+
+    bins = np.arange(0, 361, 10)
+
+    medians = []
+    counts = []
+    bin_centers = []
+
+    min_count = 1
+
+    for i in range(len(bins)-1):
+
+        mask = (angles >= bins[i]) & (angles < bins[i+1])
+
+        vals = values[mask]
+
+        counts.append(len(vals))
+        bin_centers.append((bins[i] + bins[i+1]) / 2)
+
+        if len(vals) >= min_count:
+            medians.append(np.median(vals))
+        else:
+            medians.append(np.nan)
+
+    medians = np.array(medians)
+    counts = np.array(counts)
+    bin_centers = np.array(bin_centers)
+    if plot_bins == True:
+        ax.scatter(bin_centers, medians, color = 'red', s = 150, edgecolors='black', linewidths=1, label = 'Median bins')
+
+    
+    #drop nan values
+    mask = ~np.isnan(medians)
+    medians = medians[mask]
+    counts = counts[mask]
+    bin_centers = bin_centers[mask]
+    
+
+    if niazi == True:
+        
+        p0 = [1.0, 10.0, 180.0]   # a, b, phi guesses
+        if plot_bins == True:
+            Z_data = bin_centers
+            y_data = medians
+        elif plot_bins == False:
+            Z_data = baz
+            y_data = slow_error
+        params, cov = curve_fit(cos_model, Z_data, y_data, p0=p0)
+        a_fit, b_fit, phi_fit = params
+        print('Strike from Niazi plot:', phi_fit) #180 + phi_fit
+        print(a_fit, b_fit, phi_fit)
+        #Plot niazi fit
+        Z_fit = np.linspace(0, 360, 500)
+        y_fit = cos_model(Z_fit, *params)
+        ax.plot(Z_fit, y_fit, color = 'Red', linewidth = 2.5, 
+                label = 'Fourier fit', alpha= 0.5)
+    
+    #------------------------------------------------------
+    #Fourier fit------------------------------
+    if plot_fourier == True:
+        if plot_bins == True:
+            theta = np.deg2rad(bin_centers)
+            params, _ = curve_fit(fourier5, theta, medians)
+        elif plot_bins == False:
+            theta = np.deg2rad(baz)
+            params, _ = curve_fit(fourier5, theta, slow_error)
+
+        # Smooth curve
+        theta_fit = np.linspace(0, 2*np.pi, 500)
+
+        y_fit = fourier5(theta_fit, *params)
+        
+        ax.plot(np.rad2deg(theta_fit), y_fit, color = 'red', linewidth = 2.5, 
+                alpha= 1.0, label = 'Fourier fit')
+    
+    
+    #------------------------------------------------------
+    #Anisotropic harmonic
+    if plot_anisotropic == True:
+        #params, _ = curve_fit(anisotropic_harmonic, baz, baz_error)
+        if plot_bins == True:
+            params, _ = curve_fit(anisotropic_harmonic, bin_centers, medians)
+        if plot_bins == False:
+            params, _ = curve_fit(anisotropic_harmonic, baz, slow_error)
+
+        A1, A2, A3, A4, A5 = params
+
+        print('Anisotropic parameters:')
+        print('A1:', A1)
+        print('A2:', A2)
+        print('A3:', A3)
+        print('A4:', A4)
+        print('A5:', A5)
+
+        fast_dir = 0.5*np.arctan(A4/A5) + np.pi/4
+        print('Anisotropic fast direction:', np.rad2deg(fast_dir))
+        ani_amp = np.sqrt((A4**2) +(A5**2))
+        print('Anisotropic amplitude:', ani_amp)
+
+        dip_max = np.sqrt((A2**2)+(A3**2))
+        print('Dip amplitude:', dip_max)
+
+        baz_fit = np.linspace(0, 360, 500)
+
+        y_fit = anisotropic_harmonic(baz_fit, *params)
+        
+        ax.plot(baz_fit, y_fit, color = 'blue', linewidth = 2.5, linestyle = 'dashdot', label = 'Anisotropic harmonic')
+
+    
+    #------------------------------------------------------
+    #Anisotropic harmonic reduced
+    if plot_anisotropic_reduced == True:
+        #params, _ = curve_fit(anisotropic_harmonic, baz, baz_error)
+        params, _ = curve_fit(anisotropic_harmonic_reduced, bin_centers, medians)
+        A1, A4, A5 = params
+
+        print('Anisotropic reduced parameters:')
+        print('A1:', A1)
+        #print('A2:', A2)
+        #print('A3:', A3)
+        print('A4:', A4)
+        print('A5:', A5)
+
+        fast_dir = 0.5*np.arctan(A4/A5) + np.pi/4
+        print('Anisotropic reduced fast direction:', np.rad2deg(fast_dir))
+        ani_amp = np.sqrt((A4**2) +(A5**2))
+        print('Anisotropic amplitude:', ani_amp)
+
+        baz_fit = np.linspace(0, 360, 500)
+
+        y_fit = anisotropic_harmonic_reduced(baz_fit, *params)
+        
+        ax.plot(baz_fit, y_fit, color = 'purple', label = 'Anisotropic harmonic reduced')
+
+
+    #------------------------------------------------------
+    #General plotting
+
+    ax.text(45,0.9, "NE", transform = trans, color = 'black', 
+            fontweight = 'bold',fontsize = 15, ha='center')
+    ax.text(135,0.9, "SE", transform = trans, color = 'black', 
+            fontweight = 'bold',fontsize = 15, ha='center')
+    ax.text(225,0.9, "SW", transform = trans, color = 'black', 
+            fontweight = 'bold',fontsize = 15, ha='center')
+    ax.text(315,0.9, "NW", transform = trans, color = 'black', 
+            fontweight = 'bold',fontsize = 15, ha='center')
+
+    ax.axvline(x=90, color = 'black', linestyle = '--')
+    ax.axvline(x=180, color = 'black', linestyle = '--')
+    ax.axvline(x=270, color = 'black', linestyle = '--')
+    ax.axhline(y=0, color = 'red', linestyle = '--', alpha = 0.3)
+
+    ax.grid(alpha = 0.3, zorder = 0)
+    ax.set_xlabel('catalog back azimuth (degrees)')
+    ax.set_ylabel('slowness error (degrees)')
+    ax.set_xlim(0,360)
+    #ax.set_ylim(-np.max(abs(baz_error)),np.max(abs(baz_error)))
+    #ax.set_ylim(-90,90) #-80, 80
+    ax.set_ylim(-0.15, 0.15)
+    #ax.set_ylim(-0.3, 0.3) #for supp. fig
+
+    ax.invert_xaxis()
+    models = [niazi, plot_anisotropic_reduced, plot_anisotropic, plot_bins, plot_fourier]
+    if any(models):
+        plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.35))
+    
+    if save == True:
+            fig.savefig(path, transparent=True, dpi=720)
+    plt.show()
+
+'''
 def slow_error_spatial(baz, slow_error, slow_error_model, color_data,
                        color_data_label, niazi = True, 
                        save = False, path = None):
@@ -403,14 +651,16 @@ def slow_error_spatial(baz, slow_error, slow_error_model, color_data,
 
     if len(slow_error_model) > 0:
         ax.scatter(baz, slow_error, color = 'gray', edgecolors = 'black',
-                   s = 100, label = 'measured')
+                   s = 100, label = 'Observed', alpha = 0.4)
         ax.scatter(baz, slow_error_model, color = 'skyblue', 
-                   edgecolors = 'black', s = 100, alpha = 0.6,  label = 'modeled')
+                   edgecolors = 'black', s = 80, alpha = 0.8, marker = 'D',  label = '3D Snell')
+        #plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.25))
     else:
         if len(color_data) > 0:
             sc = ax.scatter(baz, slow_error, c = color_data, 
-                            cmap = 'cividis_r', edgecolors = 'black', s = 100)
-            fig.colorbar(sc, label = color_data_label)
+                            cmap = 'cividis_r', edgecolors = 'black', s = 100,
+                              vmin = 0, vmax = 1)#vmin = -0.1, vmax = 0.1) #'cividis_r', 'PRGn_r'
+            #fig.colorbar(sc, label = color_data_label)
         else:
             ax.scatter(baz, slow_error, color = 'gray', alpha = 1, 
                        edgecolors = 'black', s = 100, 
@@ -437,22 +687,22 @@ def slow_error_spatial(baz, slow_error, slow_error_model, color_data,
     # Fourier series function
     def fourier5(theta,
              a0,
-             a1,b1):
-            # a2,b2):
-             #a3,b3):
-             #a4,b4):
-             #a5,b5):
+             a1,b1,#): #stop here
+             a2,b2,
+             a3,b3,
+             a4,b4,
+             a5,b5):
              #a6,b6,
              #a7,b7,
              #a8,b8):
 
         return (
             a0
-            + a1*np.cos(1*theta) + b1*np.sin(1*theta)
-            #+ a2*np.cos(2*theta) + b2*np.sin(2*theta)
-            #+ a3*np.cos(3*theta) + b3*np.sin(3*theta)
-            #+ a4*np.cos(4*theta) + b4*np.sin(4*theta)
-            #+ a5*np.cos(5*theta) + b5*np.sin(5*theta)
+            + a1*np.cos(1*theta) + b1*np.sin(1*theta) #stop here
+            + a2*np.cos(2*theta) + b2*np.sin(2*theta)
+            + a3*np.cos(3*theta) + b3*np.sin(3*theta)
+            + a4*np.cos(4*theta) + b4*np.sin(4*theta)
+            + a5*np.cos(5*theta) + b5*np.sin(5*theta)
             #+ a6*np.cos(6*theta) + b6*np.sin(6*theta)
             #+ a7*np.cos(7*theta) + b7*np.sin(7*theta)
             #+ a8*np.cos(8*theta) + b8*np.sin(8*theta)
@@ -466,7 +716,7 @@ def slow_error_spatial(baz, slow_error, slow_error_model, color_data,
 
     y_fit = fourier5(theta_fit, *params)
     ax.plot(np.rad2deg(theta_fit), y_fit, color = 'red', linewidth = 2.5, 
-                alpha= 0.8, label = 'Fourier fit')
+               alpha= 1.0, label = 'Fourier fit')
 
     ax.text(45,0.9, "NE", transform = trans, color = 'black', 
             fontweight = 'bold',fontsize = 15, ha='center')
@@ -491,13 +741,16 @@ def slow_error_spatial(baz, slow_error, slow_error_model, color_data,
     #ax.set_ylim(-0.5, 0.5)
 
     ax.invert_xaxis()
-    plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.25))
     
+    models = [niazi]
+    if any(models):
+        plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.25))
+    plt.legend(loc = 'upper left', bbox_to_anchor=(0, 0.25))
     if save == True:
         fig.savefig(path, transparent=True, dpi=720)
     
     plt.show()
-
+'''
 ############################################################
 #### VIDA PLOTS ###########################
 ############################################################
@@ -656,7 +909,8 @@ def array_layout1(lat_list, lon_list, elev_list, station_names,
 #### TIME SERIES ANALYSIS ###########################
 ############################################################
 
-def time_series_density(time_series, baz_error, start_time, end_time, save = False):
+def time_series_density(time_series, baz_error, start_time, end_time, time_bins,
+                         q05, q95, time_analysis_type = 'baz', save = False, path = None):
     
     #Calculate point denisty-----------------------------
     from scipy.stats import gaussian_kde
@@ -674,26 +928,63 @@ def time_series_density(time_series, baz_error, start_time, end_time, save = Fal
 
     fig, ax = plt.subplots(figsize=(8, 4))
    
-    cmap = "plasma"
-    vmin = 0
-    vmax = 0.001
+    cmap = "Reds" #"plasma"
+    
 
-    sc = ax.scatter(x, y, c=z, cmap=cmap,  alpha = 0.8, edgecolors = 'black', vmin = vmin, vmax = vmax, linewidths = 0.1)
+    if time_analysis_type == 'baz':
+        ax.set_ylabel("backazimuth error (degrees)")
+        ax.set_ylim(-190, 190)
+        vmin = 0
+        vmax = 0.001
+    elif time_analysis_type == 'slow':
+        ax.set_ylim(-0.3, 0.3)
+        ax.set_ylabel('slowness error (s/km)')
+        vmin = 0
+        vmax = 0.8
+
+    sc = ax.scatter(x, y, c=z, cmap=cmap,  alpha = 0.5, edgecolors = 'black', vmin = vmin, vmax = vmax, linewidths = 0.1)
+    ax.plot(time_bins, q05, color = 'purple', linestyle='dashed')
+    ax.plot(time_bins, q95, color = 'purple', linestyle='dashed')
     ax.grid(alpha=0.3)
     ax.set_xlabel("time relative to p-pick (s)")
-    ax.set_ylabel("backazimuth error (degrees)")
-    ax.set_ylim(-190, 190)
+    
     ax.set_xlim(start_time, end_time)
     
     ax.axvline(x=0, color='red', linestyle='-', alpha=0.5)
     ax.axhline(y=0, color='gray', linestyle='--')
     
-    cbar = fig.colorbar(sc, ax=ax)
-    cbar.set_label('Gaussian point density', rotation=270, labelpad=15, fontsize=10)
+    #cbar = fig.colorbar(sc, ax=ax)
+    #cbar.set_label('Gaussian point density', rotation=270, labelpad=15, fontsize=10)
+    if save:
+        fig.savefig(path, transparent=True, dpi = 720)
+        
+    plt.show()
+
+def quantiles_time_series(time_bins, quantiles, start_time, end_time, time_analysis_type = 'baz', save = False, path = None):
+    
+    fig, ax = plt.subplots(figsize = (8,4))
+
+    ax.plot(time_bins, quantiles, color = 'gray', alpha = 0.3)
+    ax.scatter(time_bins, quantiles, color = 'orange',marker = 'D',edgecolors = 'black', 
+           linewidths = 0.5, s = 50)
+    
+    ax.grid(alpha=0.3)
+    ax.set_xlabel("time relative to p-pick (s)")
+    ax.set_ylabel("quantiles")
+    if time_analysis_type == 'baz':
+        ax.set_ylim(0, 360)
+    elif time_analysis_type == 'slow':
+        ax.set_ylim(0, 0.35)
+    ax.set_xlim(start_time, end_time)
+    
+    ax.axvline(x=0, color='red', linestyle='-', alpha=0.5)
+    #ax.axhline(y=0, color='gray', linestyle='--')
+
     if save:
         fig.savefig(path, transparent=True, dpi=720)
         
     plt.show()
+
 
 
 ############################################################

@@ -12,7 +12,7 @@ import traceback
 #Functions needed for processing----------------------------
 from array_functions import (data_from_inventory, get_geometry, 
                              pull_earthquakes, check_num_stations, 
-                             stations_available_generator,
+                             stations_available_generator_hm_kd,
                              array_time_window, moveout_time, grab_preprocess,
                              least_trimmed_squares, triggers, fk_obspy)
 
@@ -25,7 +25,7 @@ from array_figures import (baz_error_spatial,
                            quantiles_time_series)
 
 from array_maps_pygmt import (pygmt_array_earthquakes, pygmt_baz_error, 
-                             pygmt_slow_error)
+                             pygmt_slow_error, pygmt_baz_error_new)
 
 #%%
 '''
@@ -175,9 +175,9 @@ def read_params(params):
 
 
 def preprocess_earthquakes(lat_list, lon_list, elev_list, use_full_deployment, 
-                           start_d1_list, end_d1_list, starttime, endtime, 
-                           max_rad, min_mag, array_name, velocity_model,
-                           min_stations):
+                           start_d1_list, end_d1_list, start_d2_list, end_d2_list,
+                           starttime, endtime, max_rad, min_mag, array_name,
+                           velocity_model, min_stations):
     
     '''
     Pulls earthquakes in the vicinity of the array based on specified magnitude/
@@ -229,11 +229,16 @@ def preprocess_earthquakes(lat_list, lon_list, elev_list, use_full_deployment,
     #------------------------------------------------
     earthquake_time = df['time_utc'].to_numpy()
 
+    #(stations_lists, 
+    #stations_available) = stations_available_generator_hm_kd(earthquake_time, 
+                                                        #station_d1_list, 
+                                                        #start_d1_list, 
+                                                        #end_d1_list)
     (stations_lists, 
-    stations_available) = stations_available_generator(earthquake_time, 
-                                                        station_d1_list, 
-                                                        start_d1_list, 
-                                                        end_d1_list)
+     stations_available,
+     deployment_all) = stations_available_generator_hm_kd(earthquake_time, station_d1_list, 
+                                       start_d1_list, end_d1_list, station_d2_list,
+                                        start_d2_list, end_d2_list, array_name)
 
     ### Drop events that don't have enough stations present--------------
     bad_idx = [i for i, v in enumerate(stations_available) if v < min_stations]
@@ -446,8 +451,14 @@ if __name__ == "__main__":
 
     #Pull inventory-----------------------
     #------------------------------------------------
-    if client_str == 'path':
-        inv = read_inventory(path_to_inventory) 
+    if path_to_inventory is not None:
+        #inv = read_inventory(path_to_inventory)
+        if array_name == 'HM':
+            array_temp = 'homer'
+        elif array_name == 'KD':
+            array_temp = 'kodiak'
+        inv = read_inventory(path_to_inventory + array_temp+'_d1_station.xml')
+        inv2 = read_inventory(path_to_inventory + array_temp+'_d2_station.xml') 
     else:
         client = Client(client_str)
         inv = client.get_stations(network=net, station=sta, channel=chan,
@@ -462,7 +473,14 @@ if __name__ == "__main__":
         inv,
         remove_stations,
         keep_stations)
-
+    #Pull station information for second deployment
+    (lat_list_nan, lon_list_nan, elev_list_nan, station_d2_list,
+    start_d2_list, end_d2_list, num_channels_d2_list) = data_from_inventory(
+        inv2,
+        remove_stations,
+        keep_stations)
+    
+    inv = inv + inv2
     #Check if enough stations present to continue------
     check = check_num_stations(min_stations, station_d1_list)
 
@@ -482,7 +500,8 @@ if __name__ == "__main__":
     (df, moveout, origin_lat, 
      origin_lon, stations_lists) = preprocess_earthquakes(lat_list, 
                            lon_list, elev_list, use_full_deployment, 
-                           start_d1_list, end_d1_list, starttime, endtime, 
+                           start_d1_list, end_d1_list, start_d2_list, 
+                           end_d2_list, starttime, endtime, 
                            max_rad, min_mag, array_name, velocity_model,
                            min_stations)
     
@@ -581,12 +600,12 @@ if __name__ == "__main__":
     print('Number of events dropped for processing error:', len_before - len(array_data_comb))
     #Save to csv-----------------------------------------------------
     if save_events == True:
-        #array_data_comb.to_csv(array_name+'_'+max_rad+'km_m'+str(int(float(min_mag)))
-                               #+'_'+processing+'_'+str(window_length)
-                               #+'_window_freq_test.csv')
         array_data_comb.to_csv(array_name+'_'+max_rad+'km_m'+str(int(float(min_mag)))
-                               +'_'+processing+'_'
-                               +'_fig5.csv')
+                               +'_'+processing+'_'+str(window_length)
+                               +'_window_freq_test.csv')
+        #array_data_comb.to_csv(array_name+'_'+max_rad+'km_m'+str(int(float(min_mag)))
+                              # +'_'+processing+'_'
+                               #+'_fig5.csv')
 
     if save_stations == True:
         station_info.to_csv(array_name+'_'+max_rad+'km_m'
@@ -692,7 +711,7 @@ if __name__ == "__main__":
 
     #Plot baz_slow_error-----------------------------
     #----------------------------------------------------
-    drop = True #drop Taup picks, i.e. events without an STA/LTA pick
+    drop = False #drop Taup picks, i.e. events without an STA/LTA pick
     if drop ==True:
         temp = pd.DataFrame(df[df['trigger_type']!= 'Taup'])
         print('Number of dropped events for Taup:', len(df) - len(temp))
@@ -714,6 +733,7 @@ if __name__ == "__main__":
     
     #color_data = df['conf_int_baz']
     #color_data = df['magnitude']
+    print('Number of remaining events:', len(df))
     color_label = 'cross correlation/power'
     model_data = []
     

@@ -10,11 +10,11 @@ from array_figures import (baz_error_spatial,
                            histogram,
                            stacked_histogram)
 
-from array_maps_pygmt import (pygmt_array_earthquakes, pygmt_baz_error, 
-                             pygmt_slow_error)
+from array_maps_pygmt import (pygmt_array_earthquakes, pygmt_baz_error_new, 
+                             pygmt_slow_error_new)
 
 from array_functions import baz_to_az, cos_model, fourier5
-from array_functions import calculate_deflection
+from array_functions import calculate_deflection, anisotropic_harmonic
 from array_functions import slab_inversion, niazi_dip_inversion
 
 ####################################
@@ -29,8 +29,8 @@ array_name = '2A'
 earthquake_map = False
 baz_error_plot = True
 slow_error_plot = True
-baz_error_map = False
-slow_error_map = False
+baz_error_map = True
+slow_error_map = True
 plot_histogram = False
 save_fig = False
 fig_path = '/Users/cadequigley/Downloads/Research/unalaska_arrays_paper/figure_components/'
@@ -51,14 +51,17 @@ model = 'inversion' #'inversion', 'fixed'
 strike = 269 #272 #277
 dip = 20 #17 #29
 oceanic_vel = 8.04 #8.3
-continental_vel = 5.8 #4 #4, 6.2
+continental_vel = 5.0 #4 #4, 6.2, 5.8
 takeoff_type = 'moho' #'moho', 'surface', 'source'
 weight_baz = 1
 weight_slow = 0
 
 
 
-df = pd.read_csv('./'+array_name+'_2000km_m3_'+processing+'_'+str(window_length)+'_window_freq_test.csv') #400 pom , 450 2A
+df1 = pd.read_csv('./'+array_name+'_2000km_m3_'+processing+'_'+str(window_length)+'_window_freq_test.csv') #400 pom , 450 2A
+df1 = pd.DataFrame(df1[df1['distance']<= 1000 ]) #1800
+df = pd.read_csv('./2A_1000km_m3_lts__window_freq_map_fig.csv')
+#%%
 #df = pd.DataFrame(df[df['backazimuth']>= 210])
 #df = pd.DataFrame(df[df['backazimuth']<= 80])
 #df = pd.DataFrame(df[df['distance']<= 1800 ]) #1800
@@ -67,6 +70,8 @@ df = pd.DataFrame(df[df['distance']<= 1000 ]) #1800
 #df = pd.concat([df, df1]).drop_duplicates( subset='event_id', keep='first')
 #%%
 print('Number of events:', len(df))
+#df['baz_error'] = -1*df['baz_error']
+#df['slow_error'] = -1*df['slow_error']
 #%%
 ##Drop values that did not have a trigger-----------------
 if drop_taup ==True:
@@ -111,17 +116,15 @@ Z_fit = np.linspace(0, 360, 500)
 y_fit = cos_model(Z_fit, *params)
 
 crust_vel = 3.05 # km/s
-print('Niazi strike fit:', 180 + phi_fit)
+print('Niazi strike fit:', phi_fit) # +180
 
-niazi_dip = niazi_dip_inversion(baz, slowness, slow_error, 180 + phi_fit, crust_vel)
+niazi_dip = niazi_dip_inversion(baz, slowness, slow_error, phi_fit, crust_vel) #180 + phi_fit
 
 
 
 ####################################
 ###Forward model processing-----------
 ####################################
-
-
 
 
 ### Forward model
@@ -146,7 +149,7 @@ elif takeoff_type == 'moho':
         dist_deg = kilometers2degrees(distance[i])
         arrivals = tmod.get_pierce_points(depth[i], dist_deg, 
                                         phase_list=["P", "p"],
-                                        receiver_depth_in_km=10)
+                                        receiver_depth_in_km=15) #10
 
         #p = arrivals[0].ray_param /6371
         #r = 6371 - 20
@@ -188,19 +191,22 @@ if model == 'inversion':
 elif model == 'fixed':
     #Fixed values
     model = calculate_deflection(strike, dip, oceanic_vel, continental_vel, distance, depth, takeoff, az, baz, event_id)
-
+#%%
 model_data_baz = model['model_baz_error'].to_numpy()
 model_data_slow = model['model_slowness_error'].to_numpy()
-baz_error_spatial(df['backazimuth'], baz_error, model_data_baz, df['distance'], 'distance (km)', niazi = True, 
-                  save = False, path = '/Users/cadequigley/Downloads/Research/fig3_baz_error_model.png')
-slow_error_spatial(df['backazimuth'], slow_error, model_data_slow, df['distance'], 'distance (km)', niazi = False, 
-                  save = False, path = '/Users/cadequigley/Downloads/Research/fig3_slow_error_model.png')
+baz_error_spatial(df['backazimuth'], baz_error, model_data_baz, df['distance'], 
+                  'distance (km)', niazi = False, plot_fourier = True, 
+                      plot_anisotropic = True, plot_anisotropic_reduced = False,
+                      plot_bins = False, save = False, 
+                      path = '/Users/cadequigley/Downloads/Research/unalaska_arrays_paper/figure_components/fig3_baz_error_model.pdf')
+slow_error_spatial(df['backazimuth'], slow_error, model_data_slow, df['distance'], 'distance (km)', niazi = True, plot_fourier = False,
+                  save = False, path = '/Users/cadequigley/Downloads/Research/unalaska_arrays_paper/figure_components/fig3_slow_error_model.pdf')
 
 #Plot with removed trend-----------
 model_data = []
 baz_error_spatial(df['backazimuth'], baz_error - model_data_baz, model_data, df['distance'], 'distance (km)', niazi = True, 
                   save = False, path = '/Users/cadequigley/Downloads/Research/fig3_baz_error_model.png')
-
+#%%
 ####################################
 ###PLOTS---------------------------
 ####################################
@@ -236,6 +242,7 @@ if processing == 'fk':
 else: 
     color_data = df['mdccm']
     
+    
 #color_data = df['conf_int_baz']
 #color_data = df['incident_angle']
 #color_data = df['slowness']
@@ -244,16 +251,18 @@ else:
 #color_data = df['magnitude']
 color_label = 'cross correlation/power'
 model_data = []
-    
+color_data = df['baz_error'] 
+
 if baz_error_plot == True:
     baz_error_spatial(df["backazimuth"], df["baz_error"], model_data,
-        color_data, color_label, niazi=True, save=save_fig,
-        path=fig_path + "baz_error_spatial.pdf")   
+        color_data, color_label, niazi=False, save=False,
+        path=fig_path + "baz_error_spatial_map_color_nobar.pdf")   
 
+color_data = df['slow_error']
 if slow_error_plot == True:
     slow_error_spatial(df["backazimuth"], df["slow_error"], model_data,
-        color_data, color_label, niazi=False, save=save_fig,
-        path=fig_path + "slow_error_spatial.pdf")  
+        color_data, color_label, niazi=False, save=False,
+        path=fig_path + "slow_error_spatial_map_color.pdf")  
         
 outliers = pd.DataFrame(df[df['slow_error'] < -0.2])
 
@@ -271,33 +280,36 @@ earthquake_depths = df['depth'].to_numpy()
 
 if baz_error_map == True:
 
-    pygmt_baz_error(array_lats[0], array_lons[0], array_name, 
+    pygmt_baz_error_new(array_lats[0], array_lons[0], array_name, 
                     earthquake_lats, earthquake_lons, earthquake_mags, baz,
-                    baz_error, save = save_fig, 
-                    path = fig_path+'baz_error_map_1000km.png')
+                    baz_error, save = False, 
+                    path = fig_path+'baz_error_map_400km_d2.png')
                         
     
 #Plot slowness error on map-----------------------------
 #----------------------------------------------------
 if slow_error_map == True:
-    pygmt_slow_error(array_lats[0], array_lons[0], array_name, 
+    pygmt_slow_error_new(array_lats[0], array_lons[0], array_name, 
                     earthquake_lats, earthquake_lons, earthquake_mags, 
-                    slow_error, save = save_fig, 
-                    path = fig_path+'slow_error_map_1000km.png')
+                    slow_error, save = False, 
+                    path = fig_path+'slow_error_map_400km_d2.png')
         
 if plot_histogram == True:
     upper_quantile = 0.95
     lower_quantile = 0.05
     variable_name = 'backazimuth_error'
     histogram(baz_error, lower_quantile, upper_quantile, variable_name, 
-              save = save_fig, path = fig_path+'backaimuth_histogram.png')
+              save = save_fig, path = fig_path+'backazimuth_histogram.png')
         
     variable_name = 'slowness_error'
     histogram(slow_error, lower_quantile, upper_quantile, variable_name, 
             save = save_fig, path = fig_path+'slowness_histogram.png')
 # %%
+###############################################################
 #Plot stacked histogram----------------------------------------
 #--------------------------------------------------------------
+
+#Calculate Fourier fit--------------------------------
 theta = np.deg2rad(baz)
 
 params, _ = curve_fit(fourier5, theta, baz_error)
@@ -310,6 +322,70 @@ y_fit = fourier5(theta, *params)
 
 raw_values = baz_error
 correct_values2 = baz_error - y_fit
+print('Mean absolute error fourier5:', np.mean(np.abs(correct_values2)))
+
+
+#Calculate anisotropic harmonic--------------------------------
+#Binned statistics
+angles = baz
+values = baz_error
+
+bins = np.arange(0, 361, 10)
+
+medians = []
+counts = []
+bin_centers = []
+
+min_count = 2
+
+for i in range(len(bins)-1):
+
+    mask = (angles >= bins[i]) & (angles < bins[i+1])
+
+    vals = values[mask]
+
+    counts.append(len(vals))
+    bin_centers.append((bins[i] + bins[i+1]) / 2)
+
+    if len(vals) >= min_count:
+        medians.append(np.median(vals))
+    else:
+        medians.append(np.nan)
+
+medians = np.array(medians)
+counts = np.array(counts)
+bin_centers = np.array(bin_centers)
+    
+
+    
+    #drop nan values
+mask = ~np.isnan(medians)
+medians = medians[mask]
+counts = counts[mask]
+bin_centers = bin_centers[mask]
+    #------------------------------------------------------
+    #Anisotropic harmonic
+    
+params, _ = curve_fit(anisotropic_harmonic, bin_centers, medians)
+A1, A2, A3, A4, A5 = params
+
+
+fast_dir = 0.5*np.arctan(A4/A5) + np.pi/4
+print('Anisotropic fast direction:', np.rad2deg(fast_dir))
+ani_amp = np.sqrt((A4**2) +(A5**2))
+print('Anisotropic amplitude:', ani_amp)
+
+dip_max = np.sqrt((A2**2)+(A3**2))
+print('Dip amplitude:', dip_max)
+
+baz_fit = np.linspace(0, 360, 500)
+
+anisotropic_fit = anisotropic_harmonic(baz, *params)
+
+correct_values3 = baz_error - anisotropic_fit
+
+##Plot----------------
+
 upper_quantile = 0.95
 lower_quantile = 0.05
 variable_name = 'backazimuth_error'
@@ -318,12 +394,19 @@ correct_values = baz_error - model_data_baz
 
 
 stacked_histogram(raw_values, correct_values, lower_quantile, upper_quantile, variable_name, 
-              correct_values2 = correct_values2,
-              save = False, path = '/Users/cadequigley/Downloads/fig3_baz_hist.png')
+              correct_values2 = correct_values2, correct_values3= correct_values3,
+              save = False, path = '/Users/cadequigley/Downloads/Research/unalaska_arrays_paper/figure_components/fig3_baz_hist.png')
 
-print('Mean absolute error:', np.mean(np.abs(correct_values)))
+print('Mean absolute error:', np.mean(np.abs(baz_error)))
+print('Mean absolute error snell 3d:', np.mean(np.abs(correct_values)))
+print('Mean absolute error anisotropic harmonic:', np.mean(np.abs(correct_values3)))
+print('Mean absolute error fourier5:', np.mean(np.abs(correct_values2)))
+
 
 #------------------------------------------------
+#Slowness Histogram---------------
+#-----------------------------------------------
+
 
 p0 = [1.0, 10.0, 180.0]   # a, b, phi guesses
 
@@ -347,4 +430,4 @@ correct_values = slow_error - model_data_slow
 
 stacked_histogram(raw_values, correct_values, lower_quantile, upper_quantile, variable_name, 
               correct_values2 = correct_values2,
-              save = False, path = '/Users/cadequigley/Downloads/fig3_slow_hist.png')
+              save = False, path = '/Users/cadequigley/Downloads/Research/unalaska_arrays_paper/figure_components/fig3_slow_hist.png')

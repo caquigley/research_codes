@@ -1,47 +1,47 @@
 # Station / network parameters------------
 network:
-  net: "9C"
-  sta: "2A*"
+  net: "4E"
+  sta: "HM*"
   loc: "*"
-  chan: "SHZ"
+  chan: "DHZ"
   client: "EARTHSCOPE" #"EARTHSCOPE"
 
 stations:
-  min_stations: 10 #10
+  min_stations: 13 #10
   remove_stations: [] #["POM06", "POM07", "POM18"] #["2A12", "2A05", "2A09", "2A14"] #["POM06", "POM07", "POM18"] #['3A10', '3A15'] #["POM06", "POM07", "POM18"], []
   keep_stations: []
-  array_name: "2A"
+  array_name: "HM"
   use_full_deployment: false
-  path_to_inventory: null
+  path_to_inventory:  '/Users/cadequigley/Downloads/Research/deployment_array_design/'
   save_events: false
   save_stations: false
 
 # MSEED parameters------------------------
 mseed:
   save_mseed: false
-  mseed_path: "./2A_earthquakes_mseeds/"
+  mseed_path: "/Users/cadequigley/Downloads/Research/deployment_array_design/homer_earthquakes_mseeds/" #"./2A_earthquakes_mseeds/"
   mseed_length: 120
 
 # Earthquake search parameters------------
 earthquakes:
-  min_mag: 3.0
-  max_rad: 600 #600, 1800
-  velocity_model: "pavdut" #"ak135"
-  starttime: "2015-07-02" # "2015-06-23"
-  endtime: "2016-04-30"
+  min_mag: 2.5 #2.5
+  max_rad: 1000 #600, 100
+  velocity_model: "ak135" #"ak135"
+  starttime: "2025-09-05" # "2015-06-23"
+  endtime: "2025-11-20"
 
 # Array processing parameters-------------
 array_processing:
   processing: "lts" #fk, ls, lts
-  freq_min: 1 #[0.5, 0.5, 0.5, 0.5, 0.5, 0.5] #[3, 1.5, 0.75, 0.66, 0.5, 0.33] #0.5,1
-  freq_max: 10 #[20, 15, 10, 8, 6, 4] #10, 
-  window_length: 2 #6 #[1.5, 2, 3, 4, 5, 6] #2, 0.5, 7, 6
+  freq_min: 0.5 #[0.5, 0.5, 0.5, 0.5, 0.5, 0.5] #[3, 1.5, 0.75, 0.66, 0.5, 0.33] #0.5,1
+  freq_max: 15 #[20, 15, 10, 8, 6, 4] #10, 
+  window_length: 4 #6 #[1.5, 2, 3, 4, 5, 6] #3 best lts HM, 3 best fk, 4 best KD, 5
   window_step: 0.25 #0.25
-  window_start: -1 #-1, -2
+  window_start: -2 #-1, -2 best lts HM, -1 fk, -2
 
 # STA/LTA trigger parameters--------------
 trigger:
-  timing: "power" #trigger, power
+  timing: "trigger" #trigger, power
   ptolerance: 5
   multiple_triggers: "peak" #closest, peak, first
   no_triggers: "max mdccm"
@@ -55,7 +55,7 @@ trigger:
   time_series_start: -4 #seconds before trigger
   time_series_end: 8 #seconds after trigger
   use_EPIC_triggers: false
-  time_analysis_type: 'baz'
+  time_analysis_type: 'baz' #'baz', 'slow'
 
 # FK array processing-----------------------
 fk:
@@ -63,7 +63,7 @@ fk:
   slm_x: 1.0
   sll_y: -1.0
   slm_y: 1.0
-  sl_s: 0.03 #0.01
+  sl_s: 0.02 #0.01
   semb_thres: -1e9
   vel_thres: -1e9
   timestamp: "mlabday"
@@ -72,13 +72,13 @@ fk:
 # Plots -----------------------
 plots:
   earthquake_map: false
-  baz_error: true
-  slow_error: true
-  baz_error_map: false
+  baz_error: false
+  slow_error: false
+  baz_error_map: true
   slow_error_map: false
   plot_histogram: false
   save_fig: true
-  fig_path: '/Users/cadequigley/Downloads/Research/unalaska_arrays_paper/figure_components/' #'./figures/'
+  fig_path: '/Users/cadequigley/Downloads/Research/deployment_array_design/datamine_paper_figures/' #'./figures/'
   drop_pow: false
-  pow_thresh: 0.55 #0.35
+  pow_thresh: 0.2 #0.35
 

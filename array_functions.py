@@ -543,7 +543,6 @@ def grab_preprocess(stations, station_info, inv,
     sta_elev = station_sub['elevation'].to_numpy()
 
     try: #Try to pull event from locally
-        
         #st = read('/Users/cadequigley/Downloads/Research/deployment_array_design/'+array+'_earthquakes_mseeds/'+event_id+".mseed")
         st = read(path+event_id+'.mseed')
         st = st.slice(START, END)
@@ -560,6 +559,7 @@ def grab_preprocess(stations, station_info, inv,
         sta_lons = station_sub['lon'].to_numpy()
         stations = station_sub['station'].to_numpy()
         sta_elev = station_sub['elevation'].to_numpy()
+        print('File found!')
             #st = read('/Users/cadequigley/Downloads/Research/'+array+'_earthquakes_mseeds/'+event_ids[event]+".mseed")
     except FileNotFoundError:
         print('File not found locally, trying to pull from IRIS')
@@ -591,6 +591,7 @@ def grab_preprocess(stations, station_info, inv,
         
         if save_mseed == True:
             st.sort()
+            st.resample(100.0) #consistent with
             st.write(path+event_id+".mseed", format="MSEED")
             print('mseed saved')
 
@@ -599,7 +600,6 @@ def grab_preprocess(stations, station_info, inv,
     st.merge(fill_value='latest')
     st.trim(START, END, pad='true', fill_value=0)
     st.sort()
-    
     st.remove_sensitivity(inventory = inv)
 
         # Filter the data
@@ -1300,8 +1300,8 @@ def triggers(st, short_window, long_window, on_threshold, off_theshold,
     trigger_lists = []
     trigger_peaks = []
     trigger_lengths = []
-    for s in range(len(st)):
-        times, peaks, lengths = trigger_list(st[s], short_window, long_window,
+    for s in range(len(st_trig)):
+        times, peaks, lengths = trigger_list(st_trig[s], short_window, long_window,
                                               on_threshold, off_theshold)
         trigger_lists.append(times)
         trigger_peaks.append(peaks)
@@ -1504,11 +1504,23 @@ def snell_3d(incident, normal, v1, v2):
     l = incident/np.linalg.norm(incident) #incident vector of ray
     n = normal/np.linalg.norm(normal) #normal vector to subduction surface
     costheta1 = np.dot(n,l)
-    costheta2 = np.sqrt((1-ratio**2)*(1-costheta1**2))
-    refracted = ratio*l+(ratio*costheta1 + costheta2)*n
+    #costheta2 = np.sqrt((1-ratio**2)*(1-costheta1**2)) #Cade OG, error in parenthesis
+    #refracted = ratio*l+(ratio*costheta1 + costheta2)*n #Cade OG, error in formulation
+    costheta2 = np.sqrt(1 - (ratio**2) * (1 - costheta1**2)) 
+    refracted = ratio*l + (costheta2 - ratio*costheta1)*n 
     return refracted
 
-
+def snell_3d_test(incident, normal, v1, v2, sign):
+    ratio = v2/v1
+    l = incident/np.linalg.norm(incident)
+    n = normal/np.linalg.norm(normal)
+    costheta1 = np.dot(n, l)
+    costheta2 = np.sqrt(1 - (ratio**2)*(1-costheta1**2))
+    if sign == '+':
+        refracted = ratio*l + (ratio*costheta1 + costheta2)*n
+    else:
+        refracted = ratio*l + (costheta2 - ratio*costheta1)*n
+    return refracted
 
 def deflection_xy(incident, refracted): #analogous with baz error
     """
@@ -1854,6 +1866,17 @@ def anisotropic_harmonic(baz, A, A1, A2, A3, A4):
     
     return deviation
 
+def anisotropic_harmonic_reduced(baz, A, A3, A4):
+    baz = np.deg2rad(baz)
+    deviation = (A 
+                 #+ A1*np.sin(baz) 
+                 #+ A2*np.cos(baz)
+                 + A3*np.sin(2*baz)
+                 + A4*np.cos(2*baz)
+                )
+    
+    return deviation
+
 
 ############################################################
 #### FUNCTIONS FOR 3D SNELLS INVERSION ###########################
@@ -1906,7 +1929,8 @@ def combined_residuals(initial_guess, baz, takeoff, baz_error, slow_error,
 
         p_res[i] = p_model - slow_error[i]
         
-        return np.hstack([w_baz * baz_res, w_p * p_res])
+        #return np.hstack([w_baz * baz_res, w_p * p_res])
+    return np.hstack([w_baz * baz_res, w_p * p_res])
 
 def slab_inversion(initial_guess, bounds, source_baz, takeoff, baz_error, 
                    slow_error, weight_baz, weight_slow):
